@@ -6,15 +6,15 @@ Note: This is still in ==early development==
 
 **Functionalities:**
 - [x] Rotation and acceleration measurements
-- [] Cell tower communication
-- [] GPS tracking
-- [] Body temperature monitoring
-- [] Haptic feedback (user warnings)
+- [ ] Cell tower communication
+- [ ] GPS tracking
+- [ ] Body temperature monitoring
+- [ ] Haptic feedback (user warnings)
 
 **Future plans:**
-- [] Write own drivers for the MPU6050 
-- [] Write own drivers for the A7670E
-- [] Create a phone app (distant future)
+- [ ] Write own drivers for the MPU6050 
+- [ ] Write own drivers for the A7670E
+- [ ] Create a phone app (distant future)
 
 ### What modules are used?
 The main brain of the system is Espressif's ESP32-S3, which I chose because I wanted to learn a new platform and dive deeper into low-level embedded development. That, and I got tired of Arduino. The list may change at some point.
