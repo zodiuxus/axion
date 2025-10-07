@@ -2,6 +2,7 @@
 // yes, i know this isn't how it should
 // be normally done. i did it this way
 // because i was running out of time.
+#include <cmath>
 #ifndef AXION_LOGIC_H
 #define AXION_LOGIC_H
 // multi-file definitions
@@ -22,6 +23,11 @@ inline uint16_t packetSize = 42;
 inline uint16_t fifoCount;
 inline uint8_t fifoBuffer[64];
 inline uint8_t mpuIntStatus;
+
+inline float lat = 0.0;
+inline float lon = 0.0;
+inline float alt = 0.0;
+inline float speed = 0.0;
 
 // function definitions
 bool send_at_command(const char* cmd, int max_timeout_ms, const char* expected_response);

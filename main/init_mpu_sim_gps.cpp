@@ -5,23 +5,24 @@
 #include "driver/uart.h"
 
 #include "esp_log.h"
-#include "esp_timer.h"
 
-#include "MPU6050_6Axis_MotionApps20.h"
 #include "logic.h"
-// Port and pin definitions
-#define PIN_I2C_SDA 4
-#define PIN_I2C_SCL 5
 
-#define PIN_MPU_INT 6
+/* Port and pin definitions */
 
+// MPU6050
+#define PIN_I2C_SDA 5
+#define PIN_I2C_SCL 6
+#define PIN_MPU_INT 7
 #define I2C_MASTER_FREQ_HZ 100000
 
+// A7670E
 #define PIN_UART_TX 17
 #define PIN_UART_RX 18
 #define PIN_UART_RTS 15
 #define PIN_UART_CTS 16
 #define UART_TIMEOUT_MS 2000
+
 
 void i2c_setup() {
     i2c_config_t conf = {};
@@ -65,7 +66,7 @@ void mpu_setup() {
     mpu.CalibrateAccel(6);
     mpu.CalibrateGyro(6);
 
-    // mpu.setDMPEnabled(true);
+    mpu.setDMPEnabled(true);
 
     vTaskDelete(nullptr);
 }
@@ -83,6 +84,7 @@ void setup_gnss() {
     if (send_at_command("AT+CGNSSINFO?", 9000, "OK")) xTaskCreate(TaskFunction_t(get_coords), "get_coords", 4096, nullptr, 2, nullptr);
     vTaskDelete(nullptr);
 }
+
 
 void at_init() {
     ESP_LOGW(TAG, "Setting up A7670E...");

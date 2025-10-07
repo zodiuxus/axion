@@ -3,20 +3,11 @@ dependencies:
   ## Required IDF version
   idf:
     version: '>=4.1.0'
-  # # Put list of dependencies here
-  # # For components maintained by Espressif:
-  # component: "~1.0.0"
-  # # For 3rd party components:
-  # username/component: ">=1.0.0,<2.0.0"
-  # username2/component2:
-  #   version: "~1.0.0"
-  #   # For transient dependencies `public` flag can be set.
-  #   # `public` flag doesn't have an effect dependencies of the `main` component.
-  #   # All dependencies of `main` are public by default.
-  #   public: true
-  tinyekf:
-    path: '../components/tinyekf'
   I2Cdev:
     path: '../components/I2Cdev'
   MPU6050:
     path: '../components/MPU6050'
+  esp32-ds18b20:
+    path: '../components/esp32-ds18b20'
+  esp32-owb:
+    path: '../components/esp32-owb'
