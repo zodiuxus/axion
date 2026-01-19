@@ -6,8 +6,8 @@ Note: This is still in ==early development==
 
 **Functionalities:**
 - [x] Rotation and acceleration measurements
-- [ ] Cell tower communication
-- [ ] GPS tracking
+- [x] Cell tower communication
+- [x] GPS tracking
 - [ ] Body temperature monitoring
 - [ ] Haptic feedback (user warnings)
 
