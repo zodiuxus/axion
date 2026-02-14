@@ -23,7 +23,13 @@ inline uint16_t fifoCount;
 inline uint8_t fifoBuffer[64];
 inline uint8_t mpuIntStatus;
 
+inline float pos[3] = {0.0, 0.0, 0.0};
+inline float speed = 0.0;
+
 // function definitions
 bool send_at_command(const char* cmd, int max_timeout_ms, const char* expected_response);
 void get_coords();
+void get_rpy();
+void get_thermometer_reading();
+void health_check();
 #endif //AXION_LOGIC_H

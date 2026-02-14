@@ -15,7 +15,7 @@
 
 #define PIN_MPU_INT 6
 
-#define I2C_MASTER_FREQ_HZ 100000
+#define I2C_MASTER_FREQ_HZ 400000
 
 #define PIN_UART_TX 17
 #define PIN_UART_RX 18
@@ -64,8 +64,10 @@ void mpu_setup() {
     if (mpu.testConnection()) ESP_LOGI(TAG, "Success");
     mpu.CalibrateAccel(6);
     mpu.CalibrateGyro(6);
-
-    // mpu.setDMPEnabled(true);
+    // mpu.setXGyroOffset(220);
+    // mpu.setYGyroOffset(76);
+    // mpu.setZGyroOffset(-85);
+    // mpu.setZAccelOffset(1788);
 
     vTaskDelete(nullptr);
 }
