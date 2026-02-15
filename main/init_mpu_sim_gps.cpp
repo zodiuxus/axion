@@ -6,9 +6,8 @@
 
 #include "esp_log.h"
 
+#include "MPU6050_6Axis_MotionApps20.h"
 #include "logic.h"
-
-/* Port and pin definitions */
 
 // MPU6050
 #define PIN_I2C_SDA 5
@@ -33,9 +32,9 @@ void i2c_setup() {
     conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
     conf.master.clk_speed = I2C_MASTER_FREQ_HZ;
 
-    ESP_LOGI(TAG, "Param config");
+    // ESP_LOGI(TAG, "Param config");
   ESP_ERROR_CHECK(i2c_param_config(I2C_NUM_0, &conf));
-    ESP_LOGI(TAG, "Driver install");
+    // ESP_LOGI(TAG, "Driver install");
   ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0, conf.mode, 0, 0, 0));
     vTaskDelete(nullptr);
 }
@@ -62,7 +61,7 @@ void mpu_setup() {
     mpu.initialize();
     mpu.dmpInitialize();
 
-    if (mpu.testConnection()) ESP_LOGI(TAG, "Success");
+    if (mpu.testConnection()) ESP_LOGI(TAG, "MPU6050 Init success");
     mpu.CalibrateAccel(6);
     mpu.CalibrateGyro(6);
 
@@ -113,5 +112,7 @@ void at_init() {
     send_at_command("AT+COPS?", 45000, "29403");
 
     setup_gnss();
+    
+    xEventGroupSetBits(sysReady, SYSTEM_READY);
     vTaskDelete(nullptr);
 }

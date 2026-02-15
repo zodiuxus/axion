@@ -5,9 +5,10 @@
 #include <cmath>
 #ifndef AXION_LOGIC_H
 #define AXION_LOGIC_H
-// multi-file definitions
 #define BUF_UART 225
 #define PORT_UART UART_NUM_1
+
+#define SYSTEM_READY BIT0
 
 #include <MPU6050.h>
 
@@ -24,10 +25,14 @@ inline uint16_t fifoCount;
 inline uint8_t fifoBuffer[64];
 inline uint8_t mpuIntStatus;
 
-inline float lat = 0.0;
-inline float lon = 0.0;
+inline double lat = 0.0;
+inline double lon = 0.0;
 inline float alt = 0.0;
 inline float speed = 0.0;
+
+inline bool debugOutput = false;
+
+inline EventGroupHandle_t sysReady;
 
 // function definitions
 bool send_at_command(const char* cmd, int max_timeout_ms, const char* expected_response);

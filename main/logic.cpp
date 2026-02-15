@@ -22,7 +22,7 @@ bool send_at_command(const char* cmd, int max_timeout_ms, const char* expected_r
 
     uart_write_bytes(PORT_UART, cmd_buf, len);
     uart_flush(PORT_UART);
-    ESP_LOGI(TAG, "Sent AT command: %s\n", cmd);
+    if (debugOutput) ESP_LOGI(TAG, "Sent AT command: %s\n", cmd);
 
     len = 0;
     bool response_found = false;
@@ -39,33 +39,26 @@ bool send_at_command(const char* cmd, int max_timeout_ms, const char* expected_r
         if (strstr(response_buf, expected_response)) response_found = true;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    ESP_LOGI(TAG, "Response:\n%s", response_buf);
+    if (debugOutput) ESP_LOGI(TAG, "Response:\n%s", response_buf);
     if (response_found) return true;
     return false;
 }
 
 void combine_sensors() {
+  xEventGroupWaitBits(sysReady, SYSTEM_READY, pdFALSE, pdTRUE, portMAX_DELAY);
+  printf("\n\n\n\n");
   while (true) {
-    ESP_LOGI(TAG, "Temperature info: %.2f", temp_values[0]);
-    ESP_LOGI(TAG, "GPS info:\nPosition: %f, %f, %f\nSpeed: %.2f", lat, lon, alt, speed);
-    ESP_LOGI(TAG, "RPY: %3.1f, %3.1f, %3.1f", ypr[2]*180/M_PI, ypr[1]*180/M_PI, ypr[0]*180/M_PI);
-    
-
-
-    // They get the data far faster than this
-    // however, for simplicity, I will print
-    // them once every second, as it is for
-    // testing purposes, and nothing else
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    printf("\033[4F");
+    printf("\033[KTemperature info: %.2f\n", temp_values[0]);
+    printf("\033[KPosition: %f, %f, %f\n", lat, lon, alt);
+    printf("\033[KSpeed: %.2f\n", speed);
+    printf("\033[KRPY: %3.2f, %3.2f, %3.2f\n", ypr[2]*180/M_PI, ypr[1]*180/M_PI, ypr[0]*180/M_PI);
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
   vTaskDelete(nullptr);
 }
 
-float convert_coords(float num) {
-  uint8_t degrees = static_cast<int>(num/100);
-  float minutes = num - (degrees*100);
-  return degrees + (minutes / 60.0);
-}
 
 void parse_gnss_info(char* data) {
   /*
@@ -96,10 +89,7 @@ void parse_gnss_info(char* data) {
     counter++;
   }
   
-  lat = convert_coords(lat);
-  lon = convert_coords(lon);
   speed = speed * 0.51445;
-  ESP_LOGI(TAG, "lat %f - lon %f - alt %f - speed %f", lat, lon, alt, speed);
 }
 
 void get_coords() {
@@ -126,9 +116,11 @@ void get_rpy() {
           mpu.dmpGetQuaternion(&q, fifoBuffer);
           mpu.dmpGetGravity(&gravity, &q);
           mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-          printf("YAW: %3.1f, ", ypr[0] * 180/M_PI);
-          printf("PITCH: %3.1f, ", ypr[1] * 180/M_PI);
-          printf("ROLL: %3.1f \n", ypr[2] * 180/M_PI);
+          if (debugOutput) {
+            printf("YAW: %3.1f, ", ypr[0] * 180/M_PI);
+            printf("PITCH: %3.1f, ", ypr[1] * 180/M_PI);
+            printf("ROLL: %3.1f \n", ypr[2] * 180/M_PI);
+          }
 	    }
 
 		vTaskDelay(5/portTICK_PERIOD_MS);

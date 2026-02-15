@@ -1,0 +1,4 @@
+build/
+*.lock
+sdkconfig
+sdkconfig.old
