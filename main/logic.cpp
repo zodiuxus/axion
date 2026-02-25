@@ -45,7 +45,8 @@ bool send_at_command(const char* cmd, int max_timeout_ms, const char* expected_r
 }
 
 void combine_sensors() {
-  xEventGroupWaitBits(sysReady, SYSTEM_READY, pdFALSE, pdTRUE, portMAX_DELAY);
+  xEventGroupWaitBits(mpuReady, MPU_READY, pdFALSE, pdTRUE, portMAX_DELAY);
+  xEventGroupWaitBits(atReady, AT_READY, pdFALSE, pdTRUE, portMAX_DELAY);
   printf("\n\n\n\n");
   while (true) {
     printf("\033[4F");
@@ -54,11 +55,10 @@ void combine_sensors() {
     printf("\033[KSpeed: %.2f\n", speed);
     printf("\033[KRPY: %3.2f, %3.2f, %3.2f\n", ypr[2]*180/M_PI, ypr[1]*180/M_PI, ypr[0]*180/M_PI);
     fflush(stdout);
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
   vTaskDelete(nullptr);
 }
-
 
 void parse_gnss_info(char* data) {
   /*
@@ -102,10 +102,10 @@ void get_coords() {
 }
 
 void get_rpy() {
+  xEventGroupWaitBits(mpuReady, MPU_READY, pdFALSE, pdTRUE, portMAX_DELAY);
   while(1){
 	    mpuIntStatus = mpu.getIntStatus();
-		fifoCount = mpu.getFIFOCount();
-
+      fifoCount = mpu.getFIFOCount();
 	    if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
 	        mpu.resetFIFO();
 
@@ -116,14 +116,9 @@ void get_rpy() {
           mpu.dmpGetQuaternion(&q, fifoBuffer);
           mpu.dmpGetGravity(&gravity, &q);
           mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-          if (debugOutput) {
-            printf("YAW: %3.1f, ", ypr[0] * 180/M_PI);
-            printf("PITCH: %3.1f, ", ypr[1] * 180/M_PI);
-            printf("ROLL: %3.1f \n", ypr[2] * 180/M_PI);
-          }
 	    }
 
-		vTaskDelay(5/portTICK_PERIOD_MS);
+		vTaskDelay(10/portTICK_PERIOD_MS);
 	}
 
 	vTaskDelete(nullptr);

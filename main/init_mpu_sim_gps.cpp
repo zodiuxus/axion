@@ -9,20 +9,6 @@
 #include "MPU6050_6Axis_MotionApps20.h"
 #include "logic.h"
 
-// MPU6050
-#define PIN_I2C_SDA 5
-#define PIN_I2C_SCL 6
-#define PIN_MPU_INT 7
-#define I2C_MASTER_FREQ_HZ 100000
-
-// A7670E
-#define PIN_UART_TX 17
-#define PIN_UART_RX 18
-#define PIN_UART_RTS 15
-#define PIN_UART_CTS 16
-#define UART_TIMEOUT_MS 2000
-
-
 void i2c_setup() {
     i2c_config_t conf = {};
     conf.mode = I2C_MODE_MASTER;
@@ -66,6 +52,9 @@ void mpu_setup() {
     mpu.CalibrateGyro(6);
 
     mpu.setDMPEnabled(true);
+    packetSize = mpu.dmpGetFIFOPacketSize();
+    ESP_LOGI(TAG, "MPU6050 DMP started");
+    xEventGroupSetBits(mpuReady, MPU_READY);
 
     vTaskDelete(nullptr);
 }
@@ -81,6 +70,7 @@ void setup_gnss() {
     }
     send_at_command("AT+CGNSSURC=0", 10000, "OK");
     if (send_at_command("AT+CGNSSINFO?", 9000, "OK")) xTaskCreate(TaskFunction_t(get_coords), "get_coords", 4096, nullptr, 2, nullptr);
+    ESP_LOGI(TAG, "Finished GNSS setup");
     vTaskDelete(nullptr);
 }
 
@@ -111,8 +101,10 @@ void at_init() {
     send_at_command("AT+CNSMOD?", 2000, "8");
     send_at_command("AT+COPS?", 45000, "29403");
 
-    setup_gnss();
+    send_at_command("AT+CMGF=1", 9000, "OK");
+    xEventGroupSetBits(atReady, AT_READY);
+    xTaskCreate(TaskFunction_t(setup_gnss), "gnss", 4096, nullptr, 0, nullptr);
     
-    xEventGroupSetBits(sysReady, SYSTEM_READY);
+    ESP_LOGI(TAG, "A7670E Finished setup");
     vTaskDelete(nullptr);
 }

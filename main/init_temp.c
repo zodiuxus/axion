@@ -1,22 +1,19 @@
-#include "driver/rmt_types_legacy.h"
 #include "freertos/idf_additions.h"
 #include "owb.h"
-#include "owb_rmt.h"
+#include "owb_gpio.h"
 #include "ds18b20.h"
-#include "soc/gpio_num.h"
 #include "values.h"
 //
 // Temp. sensor
-#define PIN_DS18B20 GPIO_NUM_18
-#define MAX_DEVICES 1
+#define MAX_DEVICES 8
 #define SAMPLE_PERIOD 1000
 #define DS18B20_RESOLUTION DS18B20_RESOLUTION_12_BIT
 float temp_values[MAX_DEVICES] = {0};
 
 void temp_setup() {
   OneWireBus *owb;
-  owb_rmt_driver_info rmt_driver_info;
-  owb = owb_rmt_initialize(&rmt_driver_info, PIN_DS18B20, RMT_CHANNEL_0, RMT_CHANNEL_4);
+  owb_gpio_driver_info gpio_driver_info;
+  owb = owb_gpio_initialize(&gpio_driver_info, PIN_DS18B20);
   owb_use_crc(owb, true);
   printf("Find devices:\n");
 
@@ -142,16 +139,16 @@ void temp_setup() {
               }
 
               // Print results in a separate loop, after all have been read
-              printf("\nTemperature readings (degrees C): sample %d\n", ++sample_count);
-              for (int i = 0; i < num_devices; ++i)
-              {
-                  if (errors[i] != DS18B20_OK)
-                  {
-                      ++errors_count[i];
-                  }
-
-                  printf("  %d: %.1f    %d errors\n", i, temp_values[i], errors_count[i]);
-              }
+              // printf("\nTemperature readings (degrees C): sample %d\n", ++sample_count);
+              // for (int i = 0; i < num_devices; ++i)
+              // {
+              //     if (errors[i] != DS18B20_OK)
+              //     {
+              //         ++errors_count[i];
+              //     }
+              //
+              //     printf("  %d: %.1f    %d errors\n", i, temp_values[i], errors_count[i]);
+              // }
 
               vTaskDelayUntil(&last_wake_time, SAMPLE_PERIOD / portTICK_PERIOD_MS);
           }

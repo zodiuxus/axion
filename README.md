@@ -8,10 +8,10 @@ Note: This is still in ==early development==
 - [x] Cell tower communication
 - [x] GPS tracking
 - [x] Body temperature monitoring
-- [ ] Haptic feedback (user warnings)
+- [x] Haptic feedback (user warnings)
 
 **Future plans:**
-- [ ] Implement Kalman filter for speed and position
+- [ ] ~Implement Kalman filter for speed and position~ (Seems no longer necessary due to the accuracy of the sensors, but could help either way)
 - [ ] Create a phone app (distant future)
 
 ### What modules are used?
