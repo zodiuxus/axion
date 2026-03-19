@@ -9,6 +9,7 @@ Note: This is still in ==early development==
 - [x] GPS tracking
 - [x] Body temperature monitoring
 - [x] Haptic feedback (user warnings)
+- [ ] Pulse oximeter
 
 **Future plans:**
 - [ ] ~Implement Kalman filter for speed and position~ (Seems no longer necessary due to the accuracy of the sensors, but could help either way)
