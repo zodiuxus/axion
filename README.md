@@ -15,14 +15,13 @@
 
 ## Quick start
 
-1. **Install ESP-IDF v5.x** (the project has been validated against the v5 line; v4.x is no longer supported by `idf_component.yml`).
+1. **Install ESP-IDF v5.x**
 
-2. **Clone and prepare secrets.** The project no longer ships hard-coded device credentials. Copy the template and edit it:
+2. **Clone and prepare secrets.** Copy the template and edit it:
    ```bash
    cp main/secrets.h.example main/secrets.h
    # edit main/secrets.h with your SIM PIN and alert phone numbers
    ```
-   `main/secrets.h` is gitignored — it will never be committed by accident.
 
 3. **Set the target and build:**
    ```bash
