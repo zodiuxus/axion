@@ -1,5 +1,20 @@
 build/
+managed_components/
+dependencies.lock
 *.lock
 sdkconfig
 sdkconfig.old
-.github/
+sdkconfig.defaults.old
+
+# Secrets — never commit real device credentials
+main/secrets.h
+
+# IDE / editor
+.vscode/
+.idea/
+.cache/
+*.swp
+*.swo
+*~
+
+# GitHub Actions workflows are kept under repo control

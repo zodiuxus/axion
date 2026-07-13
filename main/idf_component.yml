@@ -1,8 +1,7 @@
 ## IDF Component Manager Manifest File
 dependencies:
-  ## Required IDF version
   idf:
-    version: '>=4.1.0'
+    version: '>=5.0.0'
   I2Cdev:
     path: '../components/I2Cdev'
   MPU6050:
@@ -11,3 +10,5 @@ dependencies:
     path: '../components/esp32-ds18b20'
   esp32-owb:
     path: '../components/esp32-owb'
+  max30102:
+    path: '../components/max30102'
