@@ -1,5 +1,5 @@
 /**
- * state.cpp — see state.h.
+ * state.cpp - see state.h.
  */
 #include "state.h"
 

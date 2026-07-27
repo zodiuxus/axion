@@ -1,11 +1,11 @@
 /**
- * mpu.cpp — MPU6050 setup + DMP YPR task + raw accel helper.
+ * mpu.cpp - MPU6050 setup + DMP YPR task + raw accel helper.
  *
  * The MPU6050's full-scale accel range is set to ±4g (8192 LSB/g) rather
  * than the library default of ±2g. This gives headroom above the 2G
  * collision trigger threshold (COLLISION_THRESHOLD_G) so that single-axis
  * readings at the trigger point don't saturate at int16 max. The DMP
- * output is unaffected by this setting — it uses its own internal
+ * output is unaffected by this setting - it uses its own internal
  * scaling for the gravity vector and quaternion computation.
  */
 #include "mpu.h"
@@ -118,7 +118,7 @@ bool mpu_get_raw_accel_g(float *ax, float *ay, float *az)
 {
     /* Wait until the MPU has been initialized. Callers (e.g. collision_task)
      * normally wait on BIT_MPU_READY first, but this guard makes the helper
-     * safe to call even before init completes — it just returns false. */
+     * safe to call even before init completes - it just returns false. */
     if ((xEventGroupGetBits(g_sensors_ready) & BIT_MPU_READY) == 0) {
         return false;
     }

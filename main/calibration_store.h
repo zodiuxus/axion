@@ -1,30 +1,31 @@
 #pragma once
 /**
- * calibration_store.h — NVS-backed persistent bitfield for calibration
+ * calibration_store.h - NVS-backed persistent bitfield for calibration
  * and factory-reset state.
  *
  * Storage format: a single uint32 in NVS namespace "axion", key "cal_flags".
  * Each bit is a boolean flag (see cal_flag_t). This is the "hex value"
- * approach the user described — compact, easy to extend (just OR in more
+ * approach the user described - compact, easy to extend (just OR in more
  * bits), and native to NVS. In logs it shows as e.g. 0x00000001.
  *
  * Why NVS instead of a literal file: NVS is the ESP-IDF-native way to
  * persist small settings. It's robust to power loss, wear-leveled, and
  * doesn't require pulling in a filesystem. If you later want to migrate
  * to LittleFS for human-readable files, the change is localized to this
- * module — callers only see cal_flag_t / get / set / clear.
+ * module - callers only see cal_flag_t / get / set / clear.
  *
  * Current bit assignments:
  *   bit 0  CAL_FLAG_FIRST_RUN    1 = device needs calibration on next boot
  *                                 (set at factory or via factory_reset)
  *   bits 1–31  reserved for future use (temp offset valid, oxim offset
- *              valid, etc. — "we'll add those options in detail later on")
+ *              valid, etc. - "we'll add those options in detail later on")
  */
 #ifndef AXION_CALIBRATION_STORE_H
 #define AXION_CALIBRATION_STORE_H
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -72,6 +73,24 @@ esp_err_t calibration_store_get_temp_baseline(float *out);
 
 /** Store the baseline and set CAL_FLAG_TEMP_BASELINE_VALID. */
 esp_err_t calibration_store_set_temp_baseline(float val);
+
+/* ---- Carrier + APN (strings) ----------------------------------------- */
+/* Carrier-specific secrets (MCC+MNC, APN name/user/pass) are seeded
+ * from secrets.h on first boot, then copied into NVS so they can be
+ * updated at runtime without reflashing. NVS is the source of truth
+ * after first boot; secrets.h is only the factory default.
+ *
+ * `cal_flag_t` has no per-field valid bits here - a missing key is
+ * signaled by ESP_ERR_NVS_NOT_FOUND from the getter, and the modem
+ * bring-up code falls back to the secrets.h value in that case. */
+
+/** Read a string secret from NVS. `out` is NUL-terminated.
+ *  Returns ESP_ERR_NVS_NOT_FOUND if the key hasn't been set yet.
+ *  Caller must provide a buffer of at least `out_size` bytes. */
+esp_err_t calibration_store_get_str(const char *key, char *out, size_t out_size);
+
+/** Write a string secret to NVS. Persists immediately. */
+esp_err_t calibration_store_set_str(const char *key, const char *val);
 
 #ifdef __cplusplus
 }

@@ -1,13 +1,13 @@
 #pragma once
 /**
- * status_led.h — Green status LED task.
+ * status_led.h - Green status LED task.
  *
  * LED behaviour:
  *   - BOOTING (things starting up):  blink 25 ms on / 75 ms off (100 ms period)
  *   - CALIBRATING (first run only): blink 50 ms on / 150 ms off (200 ms period)
  *   - COMPLETE: solid on for 2 s, then off permanently
  *
- * On a non-first-run boot the CALIBRATING phase is skipped — the LED
+ * On a non-first-run boot the CALIBRATING phase is skipped - the LED
  * goes straight from BOOTING to COMPLETE once all sensors have set
  * their BIT_*_CALIBRATED bits.
  *

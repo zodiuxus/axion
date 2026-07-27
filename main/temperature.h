@@ -1,6 +1,6 @@
 #pragma once
 /**
- * temperature.h — DS18B20 body-temperature task.
+ * temperature.h - DS18B20 body-temperature task.
  */
 #ifndef AXION_TEMPERATURE_H
 #define AXION_TEMPERATURE_H

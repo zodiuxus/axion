@@ -1,6 +1,6 @@
 #pragma once
 /**
- * config.h — Static, non-secret hardware configuration and tuning constants.
+ * config.h - Static, non-secret hardware configuration and tuning constants.
  *
  * Anything device-specific or sensitive (SIM PIN, alert phone numbers) goes
  * in `secrets.h` instead, which is intentionally gitignored.
@@ -93,7 +93,7 @@ extern "C" {
 #define ALERT_MS                5000U
 #define BUZZER_PERIOD_MS        500U
 
-/* Body temperature thresholds (Celsius) — baseline-relative deltas.
+/* Body temperature thresholds (°C) - baseline-relative deltas.
  * The baseline is the user's calibrated normal body temp (stored in NVS
  * after the first-run 2-minute calibration, loaded into shared state on
  * every boot). Hypo/hyper are checked as deltas from that baseline, so

@@ -1,5 +1,5 @@
 /**
- * at_command.cpp — see at_command.h.
+ * at_command.cpp - see at_command.h.
  *
  * Replaces the bare `send_at_command` in the old logic.cpp with a proper
  * mutex-protected driver. Fixes:

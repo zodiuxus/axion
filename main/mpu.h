@@ -1,6 +1,6 @@
 #pragma once
 /**
- * mpu.h — MPU6050 setup + DMP yaw/pitch/roll task + raw accel helper.
+ * mpu.h - MPU6050 setup + DMP yaw/pitch/roll task + raw accel helper.
  */
 #ifndef AXION_MPU_H
 #define AXION_MPU_H
@@ -25,7 +25,7 @@ void mpu_rpy_task(void *arg);
 /** Read raw accelerometer X/Y/Z from the MPU6050 and convert to g units
  *  under the configured full-scale range (±4g -> 8192 LSB/g).
  *
- *  Safe to call from any task — the ESP-IDF I2C driver serializes the
+ *  Safe to call from any task - the ESP-IDF I2C driver serializes the
  *  underlying bus transaction, so concurrent calls from mpu_rpy_task
  *  (DMP FIFO reads) and collision_task (raw accel reads) are fine.
  *

@@ -1,6 +1,6 @@
 #pragma once
 /**
- * at_command.h — Thread-safe A7670E modem driver.
+ * at_command.h - Thread-safe A7670E modem driver.
  *
  * All UART1 access goes through this module. A FreeRTOS mutex serializes
  * both the UART peripheral and the shared response buffer, so multiple

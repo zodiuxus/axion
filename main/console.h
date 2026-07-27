@@ -1,6 +1,6 @@
 #pragma once
 /**
- * console.h — Optional debug console task that pretty-prints sensor state.
+ * console.h - Optional debug console task that pretty-prints sensor state.
  */
 #ifndef AXION_CONSOLE_H
 #define AXION_CONSOLE_H

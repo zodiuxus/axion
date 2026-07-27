@@ -1,6 +1,6 @@
 #pragma once
 /**
- * modem.h — A7670E modem bring-up + GNSS polling.
+ * modem.h - A7670E modem bring-up + GNSS polling.
  */
 #ifndef AXION_MODEM_H
 #define AXION_MODEM_H

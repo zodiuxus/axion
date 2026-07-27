@@ -1,6 +1,6 @@
 #pragma once
 /**
- * monitor.h — Fall & vitals monitor task.
+ * monitor.h - Fall & vitals monitor task.
  */
 #ifndef AXION_MONITOR_H
 #define AXION_MONITOR_H

@@ -1,5 +1,5 @@
 /**
- * axion.cpp — application entry point.
+ * axion.cpp - application entry point.
  *
  * Wires up the Axion firmware:
  *   1. Initializes shared state + event group.
@@ -46,7 +46,7 @@ static_assert(ALERT_PHONE_1[0] != '\0',
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(TAG, "Axion booting — built " __DATE__ " " __TIME__);
+    ESP_LOGI(TAG, "Axion booting - built " __DATE__ " " __TIME__);
 
     /* ---- Core init (must come before any task that uses state/NVS) ---- */
     axion_state_init();

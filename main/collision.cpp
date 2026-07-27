@@ -1,5 +1,5 @@
 /**
- * collision.cpp — see collision.h for design notes.
+ * collision.cpp - see collision.h for design notes.
  *
  * Implementation outline:
  *   1. Wait for BIT_MPU_READY (so the MPU is initialized and I2C is up).
@@ -35,7 +35,7 @@ static const char *TAG = "axion.collision";
 void collision_task(void * /*arg*/)
 {
     /* The MPU setup task sets BIT_MPU_READY once the accel range is
-     * configured and the DMP is running. Don't poll before that — the
+     * configured and the DMP is running. Don't poll before that - the
      * I2C bus may not even be installed yet. */
     axion_state_wait_all(BIT_MPU_READY);
 
@@ -64,7 +64,7 @@ void collision_task(void * /*arg*/)
 
         int64_t now_ms = esp_timer_get_time() / 1000;
         if (now_ms - last_trigger_ms < (int64_t)COLLISION_COOLDOWN_MS) {
-            /* Still inside the cooldown from a recent trigger — drop this
+            /* Still inside the cooldown from a recent trigger - drop this
              * event to avoid spamming the monitor with one physical impact. */
             continue;
         }

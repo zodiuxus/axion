@@ -1,5 +1,5 @@
 /**
- * status_led.cpp — see status_led.h for design notes.
+ * status_led.cpp - see status_led.h for design notes.
  *
  * The task reads `CAL_FLAG_FIRST_RUN` from NVS to decide whether to
  * enter the CALIBRATING blink phase. It waits for BIT_TEMP_CALIBRATED
@@ -91,8 +91,8 @@ void status_led_task(void * /*arg*/)
 
     /* ---- COMPLETE: solid 2 s glow, then off ---- */
     /* Clear the first-run flag now that ALL sensors have set their
-     * CALIBRATED bits (or the timeout expired). Doing this here — rather
-     * than in individual sensor tasks — ensures that a reboot during
+     * CALIBRATED bits (or the timeout expired). Doing this here - rather
+     * than in individual sensor tasks - ensures that a reboot during
      * any sensor's calibration window will re-run ALL calibrations. */
     if (first_run) {
         calibration_store_clear_flag(CAL_FLAG_FIRST_RUN);

@@ -1,6 +1,6 @@
 #pragma once
 /**
- * max30102_task.h — FreeRTOS task that periodically samples the
+ * max30102_task.h - FreeRTOS task that periodically samples the
  * MAX30102, computes HR + SpO2, and pushes them into the shared state.
  */
 #ifndef AXION_MAX30102_TASK_H

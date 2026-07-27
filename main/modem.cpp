@@ -1,11 +1,19 @@
 /**
- * modem.cpp — A7670E bring-up + GNSS polling.
+ * modem.cpp - A7670E bring-up + GNSS polling.
  *
  * Replaces init_mpu_sim_gps.cpp's at_init() + setup_gnss() + get_coords()
  * with a single bring-up task and a separate long-running GNSS poller.
  *
  * All UART access goes through at_command.* (mutex-protected).
- * SIM PIN and APN come from secrets.h (gitignored).
+ * SIM PIN, carrier (MCC+MNC), and APN all come from secrets.h
+ * (gitignored) as factory defaults, but are also seeded into NVS on
+ * first boot so they can be changed at runtime without reflashing.
+ *
+ * Roaming: the configured PLMN is a PREFERENCE, not a requirement.
+ * modem_setup_task tries manual selection first; if it fails (e.g.
+ * the user is abroad), it falls back to automatic (COPS=0) and waits
+ * for CEREG stat=1 (home) or stat=5 (roaming). This lets the device
+ * send SMS to 112 from any registered EU network.
  */
 #include "modem.h"
 
@@ -21,8 +29,63 @@
 #include "config.h"
 #include "secrets.h"
 #include "state.h"
+#include "calibration_store.h"
 
 static const char *TAG = "axion.modem";
+
+/* NVS keys for the carrier-secrets cache (see secrets.h.example for
+ * the factory defaults and the rationale). */
+#define NVS_KEY_CARRIER   "carrier"
+#define NVS_KEY_APN_NAME  "apn_name"
+#define NVS_KEY_APN_USER  "apn_user"
+#define NVS_KEY_APN_PASS  "apn_pass"
+
+/* ---- Carrier-secrets resolver ---------------------------------------- */
+/* On first boot, NVS has nothing - copy the secrets.h factory defaults
+ * in and use them. On subsequent boots, NVS wins (it may have been
+ * updated at runtime). The result is cached for the duration of this
+ * boot so we don't hit NVS on every AT+COPS? retry. */
+static char s_carrier[8]   = "";   /* MCC+MNC, max 6 digits + NUL */
+static char s_apn_name[32] = "";
+static char s_apn_user[32] = "";
+static char s_apn_pass[32] = "";
+static bool s_secrets_resolved = false;
+
+static void resolve_carrier_secrets(void)
+{
+    if (s_secrets_resolved) return;
+
+    /* Carrier: NVS first, secrets.h fallback. */
+    if (calibration_store_get_str(NVS_KEY_CARRIER, s_carrier, sizeof(s_carrier)) != ESP_OK) {
+        strncpy(s_carrier, CARRIER_MCCMNC, sizeof(s_carrier) - 1);
+        s_carrier[sizeof(s_carrier) - 1] = '\0';
+        if (s_carrier[0] != '\0') {
+            calibration_store_set_str(NVS_KEY_CARRIER, s_carrier);
+        }
+    }
+
+    /* APN: same pattern. If APN_NAME is empty, the modem bring-up skips
+     * the CGDCONT configuration. */
+    if (calibration_store_get_str(NVS_KEY_APN_NAME, s_apn_name, sizeof(s_apn_name)) != ESP_OK) {
+        strncpy(s_apn_name, APN_NAME, sizeof(s_apn_name) - 1);
+        s_apn_name[sizeof(s_apn_name) - 1] = '\0';
+        calibration_store_set_str(NVS_KEY_APN_NAME, s_apn_name);
+    }
+    if (calibration_store_get_str(NVS_KEY_APN_USER, s_apn_user, sizeof(s_apn_user)) != ESP_OK) {
+        strncpy(s_apn_user, APN_USER, sizeof(s_apn_user) - 1);
+        s_apn_user[sizeof(s_apn_user) - 1] = '\0';
+        calibration_store_set_str(NVS_KEY_APN_USER, s_apn_user);
+    }
+    if (calibration_store_get_str(NVS_KEY_APN_PASS, s_apn_pass, sizeof(s_apn_pass)) != ESP_OK) {
+        strncpy(s_apn_pass, APN_PASS, sizeof(s_apn_pass) - 1);
+        s_apn_pass[sizeof(s_apn_pass) - 1] = '\0';
+        calibration_store_set_str(NVS_KEY_APN_PASS, s_apn_pass);
+    }
+
+    ESP_LOGI(TAG, "carrier secrets: plmn='%s' apn='%s'",
+             s_carrier, s_apn_name);
+    s_secrets_resolved = true;
+}
 
 /* ---- NMEA / Simcom +CGNSSINFO parser -------------------------------- */
 /* +CGNSSINFO: [<mode>],[<GPS-SVs>],[<GLONASS-SVs>],[BEIDOU-SVs],
@@ -90,11 +153,57 @@ static void gnss_power_up(void)
     ESP_LOGI(TAG, "GNSS setup done; polling task will continue");
 }
 
+/* ---- Cellular registration (home + roaming) ------------------------- */
+/* Poll AT+CEREG? until the modem reports a registered state.
+ *   stat=1  registered, home network
+ *   stat=5  registered, roaming
+ *   stat=0/2/3/4  not registered (not searching / searching / denied / unknown)
+ *
+ * Accepting stat=5 is what enables roaming - the home-PLMN-only check we
+ * used before would reject any foreign network even though the SIM is
+ * allowed to roam on it. SMS to 112 (EU emergency number) works on any
+ * registered network regardless of roaming agreement, and personal
+ * contacts work as long as the user's carrier has a roaming agreement
+ * with the visited network. */
+static bool wait_for_registration(uint32_t timeout_ms)
+{
+    const uint32_t step_ms = 2000;
+    char    buf[128];
+    uint32_t elapsed = 0;
+
+    while (elapsed < timeout_ms) {
+        if (at_command_send("AT+CEREG?", 2000, "+CEREG:")) {
+            at_command_last_response(buf, sizeof(buf));
+            /* +CEREG: <n>,<stat>[,...] - find the stat field. */
+            char *p = strstr(buf, "+CEREG:");
+            if (p) {
+                p += strlen("+CEREG:");
+                /* skip "<n>" */
+                while (*p && *p != ',') p++;
+                if (*p == ',') p++;
+                int stat = atoi(p);
+                if (stat == 1 || stat == 5) {
+                    ESP_LOGI(TAG, "registered (CEREG stat=%d, %s)",
+                             stat, (stat == 5) ? "roaming" : "home");
+                    return true;
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(step_ms));
+        elapsed += step_ms;
+    }
+    ESP_LOGW(TAG, "no registration after %ums", (unsigned)timeout_ms);
+    return false;
+}
+
 /* ---- Public tasks --------------------------------------------------- */
 void modem_setup_task(void * /*arg*/)
 {
     ESP_LOGW(TAG, "Bringing up A7670E...");
     at_modem_flush_rx();
+
+    /* Resolve carrier/APN from NVS (or seed from secrets.h on first boot). */
+    resolve_carrier_secrets();
 
     /* Nudge GNSS power on early so it has time to start acquiring. */
     at_command_send("AT+CGNSSPWR=1", 1000, "");
@@ -104,26 +213,73 @@ void modem_setup_task(void * /*arg*/)
     at_command_send("AT+SIMCOMATI", 1000, "");
 
     ESP_LOGW(TAG, "Setting up connectivity...");
-    bool registered = at_command_send("AT+COPS?", 45000, "29403");
+    /* SIM PIN first - some SIMs refuse all other AT commands until
+     * they're unlocked. */
+    if (at_command_send("AT+CPIN?", 2000, "SIM PIN")) {
+        char cpin_cmd[32];
+        snprintf(cpin_cmd, sizeof(cpin_cmd), "AT+CPIN=%s", SIM_PIN);
+        at_command_send(cpin_cmd, 2000, "READY");
+    }
+
+    /* Enable verbose CEREG URCs so we can poll the stat field reliably. */
+    if (at_command_send("AT+CEREG=?", 1000, "2")) {
+        at_command_send("AT+CEREG=2", 1000, "OK");
+    } else {
+        at_command_send("AT+CEREG=1", 1000, "OK");
+    }
+
+    /* PLMN selection strategy:
+     *   1. If a home PLMN is configured, try manual selection first
+     *      (COPS=1,2). This makes registration fast when we're at
+     *      home and avoids wandering onto an unwanted roaming partner.
+     *   2. If manual selection fails OR we're roaming, fall back to
+     *      automatic (COPS=0). The modem will pick any allowed PLMN,
+     *      including a roaming partner of the home carrier.
+     *   3. If no PLMN is configured, just go automatic from the start. */
+    if (s_carrier[0] != '\0') {
+        char cops_cmd[24];
+        snprintf(cops_cmd, sizeof(cops_cmd),
+                 "AT+COPS=1,2,\"%s\"", s_carrier);
+        if (!at_command_send(cops_cmd, 5000, "OK")) {
+            ESP_LOGW(TAG, "manual PLMN '%s' rejected; falling back to automatic",
+                     s_carrier);
+            at_command_send("AT+COPS=0", 5000, "OK");
+        }
+    } else {
+        at_command_send("AT+COPS=0", 5000, "OK");
+    }
+
+    /* Wait up to 45s for home (stat=1) OR roaming (stat=5) registration. */
+    bool registered = wait_for_registration(45000);
     if (!registered) {
-        if (at_command_send("AT+CPIN?", 2000, "SIM PIN")) {
-            char cpin_cmd[32];
-            snprintf(cpin_cmd, sizeof(cpin_cmd), "AT+CPIN=%s", SIM_PIN);
-            at_command_send(cpin_cmd, 2000, "READY");
+        ESP_LOGE(TAG, "no cellular registration - SMS path may fail");
+        /* Continue anyway; the modem may recover on its own. */
+    }
+
+    /* Attach to the PS (packet-switched) domain. SMS doesn't strictly
+     * need CGATT - it uses CS - but we set it for future data use. */
+    at_command_send("AT+CGATT=1", 2000, "OK");
+
+    /* APN configuration: only if a non-empty APN name was provided.
+     * CGDCONT defines a PDP context; we use CID 1. */
+    if (s_apn_name[0] != '\0') {
+        char cgdcont_cmd[80];
+        snprintf(cgdcont_cmd, sizeof(cgdcont_cmd),
+                 "AT+CGDCONT=1,\"IP\",\"%s\"", s_apn_name);
+        at_command_send(cgdcont_cmd, 3000, "OK");
+        /* Auth + username/password if provided (PAP, CID 1). */
+        if (s_apn_user[0] != '\0' && s_apn_pass[0] != '\0') {
+            char auth_cmd[96];
+            snprintf(auth_cmd, sizeof(auth_cmd),
+                     "AT+CGAUTH=1,1,\"%s\",\"%s\"", s_apn_user, s_apn_pass);
+            at_command_send(auth_cmd, 3000, "OK");
         }
-        if (at_command_send("AT+CEREG=?", 1000, "2")) {
-            at_command_send("AT+CEREG=2", 1000, "OK");
-        } else {
-            at_command_send("AT+CEREG=1", 1000, "OK");
-        }
-        at_command_send("AT+CGATT=1", 1000, "OK");
     }
 
     ESP_LOGW(TAG, "Verifying connectivity...");
     at_command_send("AT+CPAS", 1000, "OK");
     at_command_send("AT+CEREG?", 5000, "OK");
     at_command_send("AT+CNSMOD?", 2000, "8");
-    at_command_send("AT+COPS?", 45000, "29403");
 
     /* SMS text mode. */
     at_command_send("AT+CMGF=1", 9000, "OK");

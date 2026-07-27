@@ -1,8 +1,9 @@
 /**
- * calibration_store.cpp — see calibration_store.h for design notes.
+ * calibration_store.cpp - see calibration_store.h for design notes.
  */
 #include "calibration_store.h"
 
+#include <cstring>
 #include "esp_log.h"
 #include "nvs_flash.h"
 
@@ -39,7 +40,7 @@ esp_err_t calibration_store_init(void)
         nvs_close(h);
     }
     /* If the namespace or key doesn't exist yet (first-ever boot), treat
-     * it as a first run — the flag defaults to set. */
+     * it as a first run - the flag defaults to set. */
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         s_cached_flags = CAL_FLAG_FIRST_RUN;
         ESP_LOGI(TAG, "NVS key not found; defaulting to first-run=true (0x%08lx)",
@@ -100,7 +101,7 @@ esp_err_t calibration_store_clear_flag(uint32_t flag)
 
 esp_err_t calibration_store_request_factory_reset(void)
 {
-    ESP_LOGW(TAG, "factory reset requested — first_run flag will be set");
+    ESP_LOGW(TAG, "factory reset requested - first_run flag will be set");
     return calibration_store_set_flag(CAL_FLAG_FIRST_RUN);
 }
 
@@ -149,4 +150,64 @@ esp_err_t calibration_store_set_temp_baseline(float val)
     calibration_store_set_flag(CAL_FLAG_TEMP_BASELINE_VALID);
     ESP_LOGI(TAG, "temp baseline stored: %.2f C", (double)val);
     return ESP_OK;
+}
+
+/* ---- Carrier + APN (strings) ----------------------------------------- */
+
+esp_err_t calibration_store_get_str(const char *key, char *out, size_t out_size)
+{
+    if (!s_initialized || key == nullptr || out == nullptr || out_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS open(RO) for '%s' failed: %s", key, esp_err_to_name(err));
+        return err;
+    }
+
+    /* First query the required length (including NUL). */
+    size_t required = out_size;
+    err = nvs_get_str(h, key, out, &required);
+    nvs_close(h);
+
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        /* Quiet: callers fall back to the secrets.h default. */
+        return err;
+    }
+    if (err == ESP_ERR_NVS_INVALID_LENGTH) {
+        ESP_LOGE(TAG, "NVS str '%s' needs %u bytes, buffer is %u",
+                 key, (unsigned)required, (unsigned)out_size);
+        return err;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS read str '%s' failed: %s", key, esp_err_to_name(err));
+        return err;
+    }
+    return ESP_OK;
+}
+
+esp_err_t calibration_store_set_str(const char *key, const char *val)
+{
+    if (!s_initialized || key == nullptr || val == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS open(RW) for '%s' failed: %s", key, esp_err_to_name(err));
+        return err;
+    }
+    err = nvs_set_str(h, key, val);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS write str '%s' failed: %s", key, esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "str '%s' stored (len=%u)", key, (unsigned)std::strlen(val));
+    }
+    return err;
 }

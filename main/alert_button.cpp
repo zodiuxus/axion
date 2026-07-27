@@ -1,5 +1,5 @@
 /**
- * alert_button.cpp — see alert_button.h for design notes.
+ * alert_button.cpp - see alert_button.h for design notes.
  */
 #include "alert_button.h"
 
@@ -22,7 +22,7 @@ static void IRAM_ATTR button_isr(void * /*arg*/)
 {
     int64_t now = esp_timer_get_time();
     /* Non-blocking send; if the queue is full the event is silently
-     * dropped — that's fine, the debounce task will catch the next one. */
+     * dropped - that's fine, the debounce task will catch the next one. */
     xQueueSendFromISR(s_button_queue, &now, nullptr);
 }
 
@@ -57,7 +57,7 @@ void alert_button_init(void)
     s_button_queue = xQueueCreate(8, sizeof(int64_t));
 
     /* Install the GPIO ISR service if not already installed (other
-     * modules might have done it first — that's fine, we ignore the
+     * modules might have done it first - that's fine, we ignore the
      * "already installed" return code). */
     esp_err_t isr_err = gpio_install_isr_service(0);
     if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {

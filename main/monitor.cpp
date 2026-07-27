@@ -1,19 +1,19 @@
 /**
- * monitor.cpp — Fall, vitals, and collision monitor.
+ * monitor.cpp - Fall, vitals, and collision monitor.
  *
  * State machine: NORMAL → WARNING (5 s) → ALERT (5 s, buzzer pulsing) → SMS.
  *
  * Two edge-triggered signals from the shared event group drive the
  * out-of-band transitions:
  *
- *   BIT_ALERT_ABORT       (button press)  — at any point in WARNING or
+ *   BIT_ALERT_ABORT       (button press)  - at any point in WARNING or
  *                                            ALERT, immediately reset to
  *                                            NORMAL and arm a cooldown so
  *                                            the state machine doesn't
  *                                            re-enter WARNING while the
  *                                            user is still recovering.
  *
- *   BIT_COLLISION_DETECTED (2G+ impact)   — bypass the WARNING phase
+ *   BIT_COLLISION_DETECTED (2G+ impact)   - bypass the WARNING phase
  *                                            entirely and jump straight
  *                                            to ALERT. This is the
  *                                            highest-priority alert
@@ -25,13 +25,13 @@
  * A collision-triggered ALERT is "sticky": the normal "if alert_condition
  * cleared, return to NORMAL" check is skipped while the ALERT was caused
  * by a collision. A real impact shouldn't be cancelled just because the
- * device came to rest. The button is still the escape hatch — a press at
+ * device came to rest. The button is still the escape hatch - a press at
  * any point during the ALERT window cancels the SMS.
  *
  * After a button abort, a cooldown (ABORT_COOLDOWN_MS) prevents the state
  * machine from immediately re-entering WARNING if the alert condition is
  * still present. The cooldown does NOT apply to collision-triggered
- * alerts — a real 2G+ impact is always honored.
+ * alerts - a real 2G+ impact is always honored.
  */
 #include "monitor.h"
 
@@ -53,7 +53,7 @@
 
 static const char *TAG = "axion.monitor";
 
-/* Recipients table — populated from secrets.h. Empty slots are skipped.
+/* Recipients table - populated from secrets.h. Empty slots are skipped.
  * Order matters: ALERT_PHONE_1 (112) is contacted first, ALERT_PHONE_2
  * (personal backup) second. */
 static const char *const k_alert_phones[AXION_ALERT_PHONE_MAX_COUNT] = {
@@ -137,7 +137,7 @@ void monitor_task(void * /*arg*/)
             state                  = ALERT;
             state_start_ms         = now_ms;
             collision_alert_active = true;
-            ESP_LOGW(TAG, "collision detected — escalating directly to ALERT "
+            ESP_LOGW(TAG, "collision detected - escalating directly to ALERT "
                          "(WARNING skipped)");
             /* Fall through to the switch below; the ALERT case will pulse
              * the buzzer and send the SMS when ALERT_MS expires. */

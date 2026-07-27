@@ -1,6 +1,6 @@
 #pragma once
 /**
- * state.h — Centralized, mutex-protected sensor state.
+ * state.h - Centralized, mutex-protected sensor state.
  *
  * All sensor-producing tasks (MPU, GNSS, DS18B20, MAX30102) write into a
  * single `axion_state_t` struct under `state_mutex`. All consumer tasks

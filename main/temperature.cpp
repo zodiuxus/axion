@@ -1,15 +1,15 @@
 /**
- * temperature.cpp — DS18B20 1-Wire body-temperature task.
+ * temperature.cpp - DS18B20 1-Wire body-temperature task.
  *
  * On first run (CAL_FLAG_FIRST_RUN set in NVS), the task enters a
  * 2-minute calibration window after the first successful reading.
  * During calibration, readings are accumulated and the average is
  * logged (and will be stored as a baseline offset in NVS when the
- * offset logic is added — "we'll add those options in detail later on").
+ * offset logic is added - "we'll add those options in detail later on").
  * BIT_TEMP_CALIBRATED is set at the end of calibration.
  *
  * On non-first-run boots, BIT_TEMP_CALIBRATED is set immediately after
- * the first successful reading — no calibration window is needed.
+ * the first successful reading - no calibration window is needed.
  *
  * The CAL_FLAG_FIRST_RUN flag is cleared by the status LED task once
  * ALL sensors have set their BIT_*_CALIBRATED bits, so a reboot during
@@ -175,5 +175,5 @@ void temperature_task(void * /*arg*/)
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
     }
-    /* Unreachable — task runs forever. */
+    /* Unreachable - task runs forever. */
 }

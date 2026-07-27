@@ -1,6 +1,6 @@
 #pragma once
 /**
- * alert_button.h — Hardware button that aborts the emergency countdown.
+ * alert_button.h - Hardware button that aborts the emergency countdown.
  *
  * A short press at any time during the monitor task's WARNING or ALERT
  * phase resets the state machine to NORMAL and prevents the SMS from

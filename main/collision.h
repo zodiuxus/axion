@@ -1,6 +1,6 @@
 #pragma once
 /**
- * collision.h — Raw-accelerometer collision detector.
+ * collision.h - Raw-accelerometer collision detector.
  *
  * This is the highest-priority alert source in the system. It reads raw
  * accel X/Y/Z from the MPU6050 at ~100 Hz, computes the magnitude vector
@@ -14,7 +14,7 @@
  *
  * Why raw accel and not the DMP: the DMP output (yaw/pitch/roll) is a
  * filtered, integrated orientation estimate that deliberately smooths
- * out short transients — exactly the opposite of what we want here. A
+ * out short transients - exactly the opposite of what we want here. A
  * collision is a sharp acceleration spike that the DMP would attenuate.
  * Reading the raw accel registers gives us the unfiltered instantaneous
  * force, which is what a 2G threshold needs to be meaningful.

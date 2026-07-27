@@ -1,5 +1,5 @@
 /**
- * max30102_task.cpp — Oximetry sampling + estimation task.
+ * max30102_task.cpp - Oximetry sampling + estimation task.
  *
  * On first run (CAL_FLAG_FIRST_RUN set in NVS), the task enters a
  * 2-minute calibration window after the first valid HR/SpO2 estimate.
@@ -41,7 +41,7 @@ void max30102_task(void * /*arg*/)
     max30102_config_t cfg = max30102_default_config();
     esp_err_t err = max30102_init(I2C_MASTER_PORT, &cfg);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "max30102_init failed: %s — marking calibrated and exiting",
+        ESP_LOGE(TAG, "max30102_init failed: %s - marking calibrated and exiting",
                  esp_err_to_name(err));
         /* Set the bit so the status LED can proceed. */
         axion_state_set_ready(BIT_OXIM_CALIBRATED);
@@ -136,7 +136,7 @@ void max30102_task(void * /*arg*/)
             }
         }
         /* If calibration is still in progress but the current window
-         * was invalid (finger off), we simply skip accumulation — the
+         * was invalid (finger off), we simply skip accumulation - the
          * calibration window will time out eventually and the averages
          * will be computed from whatever valid samples we collected. */
     }
