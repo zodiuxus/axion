@@ -6,8 +6,14 @@
  *   2. Initializes NVS (for the calibration_store bitfield).
  *   3. Installs the alert-abort button ISR.
  *   4. Spawns one setup task per peripheral (I2C bus, MPU, modem, temp).
- *   5. Spawns the long-running workers (rpy, gnss, oximetry, monitor,
+ *   5. Spawns the long-running workers (mpu_int, gnss, oximetry, monitor,
  *      status LED, optional console).
+ *
+ * mpu_int_task is the single consumer of the MPU6050 INT pin and handles
+ * both DMP yaw/pitch/roll reads AND raw-accel collision detection - the
+ * chip has one INT pin, so one task covers both. There is no separate
+ * collision_task anymore (the threshold/cooldown helper lives in
+ * collision.cpp and is called from mpu_int_task).
  *
  * Secrets: SIM PIN and alert phone numbers come from `secrets.h`, which
  * is gitignored. If the file is missing the build fails here with a
@@ -32,7 +38,6 @@
 #include "console.h"
 #include "max30102_task.h"
 #include "status_led.h"
-#include "collision.h"
 
 static const char *TAG = "axion";
 
@@ -60,13 +65,12 @@ extern "C" void app_main(void)
     xTaskCreate(modem_setup_task,      "modem",     8192, nullptr, 1, nullptr);
 
     /* ---- Long-running workers ---------------------------------------- */
-    xTaskCreate(mpu_rpy_task,          "mpu_rpy",   8192, nullptr, 2, nullptr);
+    /* mpu_int_task is the single consumer of the MPU6050 INT pin. It
+     * services both DMP packet reads (yaw/pitch/roll) AND raw-accel
+     * collision detection - the chip has one INT pin, so one task
+     * covers both. */
+    xTaskCreate(mpu_int_task,          "mpu_int",   8192, nullptr, 3, nullptr);
     xTaskCreate(max30102_task,         "max30102",  8192, nullptr, 2, nullptr);
-    /* Collision detector runs at a higher priority than the monitor so
-     * that a 2G+ impact is detected and BIT_COLLISION_DETECTED is set
-     * with minimal latency, even if the monitor is mid-snapshot or
-     * pulsing the buzzer. */
-    xTaskCreate(collision_task,        "collision", 4096, nullptr, 3, nullptr);
     xTaskCreate(monitor_task,          "monitor",   4096, nullptr, 1, nullptr);
     xTaskCreate(status_led_task,       "status_led",2048, nullptr, 1, nullptr);
 

@@ -1,16 +1,15 @@
 #pragma once
 /**
- * collision.h - Raw-accelerometer collision detector.
+ * collision.h - Raw-accelerometer collision detector (helper API).
  *
- * This is the highest-priority alert source in the system. It reads raw
- * accel X/Y/Z from the MPU6050 at ~100 Hz, computes the magnitude vector
- * |a| = sqrt(ax^2 + ay^2 + az^2) in g, and fires BIT_COLLISION_DETECTED
- * in the shared event group whenever |a| >= COLLISION_THRESHOLD_G.
+ * Previously a standalone polling task. Now the threshold + cooldown
+ * check is a pure helper called from mpu_int_task on every data-ready
+ * interrupt. This avoids a second I2C consumer racing the DMP FIFO
+ * read on the same bus.
  *
- * The monitor task consumes that bit and bypasses the NORMAL->WARNING
- * grace period, escalating directly to ALERT (immediate SMS path). This
- * means a real 2G+ impact begins the contacting sequence within tens of
- * milliseconds, vs. the 5 s WARNING delay used for fall/vitals detection.
+ * The monitor task consumes BIT_COLLISION_DETECTED (set by mpu_int_task
+ * when this helper returns true) and bypasses the NORMAL->WARNING grace
+ * period, escalating directly to ALERT (immediate SMS path).
  *
  * Why raw accel and not the DMP: the DMP output (yaw/pitch/roll) is a
  * filtered, integrated orientation estimate that deliberately smooths
@@ -26,13 +25,25 @@
 #ifndef AXION_COLLISION_H
 #define AXION_COLLISION_H
 
+#include <stdint.h>
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/** FreeRTOS task: polls raw accel at COLLISION_SAMPLE_MS intervals and
- *  signals BIT_COLLISION_DETECTED on threshold exceedance. Runs forever. */
-void collision_task(void *arg);
+/**
+ * Check a single accel sample for collision.
+ *
+ * @param ax, ay, az    Acceleration in g (raw accel registers / 8192).
+ * @param now_ms        Current time in ms (esp_timer_get_time()/1000).
+ * @param last_ms       In/out: timestamp of the last accepted trigger.
+ *                      Updated in place when this call triggers.
+ * @return true if |a| >= COLLISION_THRESHOLD_G and the cooldown window
+ *                      has elapsed (caller should set the event bit).
+ */
+bool collision_check(float ax, float ay, float az,
+                     int64_t now_ms, int64_t *last_ms);
 
 #ifdef __cplusplus
 }

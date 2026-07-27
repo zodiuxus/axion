@@ -21,7 +21,11 @@ extern "C" {
 #define PIN_I2C_SDA             GPIO_NUM_5
 #define PIN_I2C_SCL             GPIO_NUM_6
 #define PIN_MPU_INT             GPIO_NUM_7
-#define I2C_MASTER_FREQ_HZ      100000U
+/* Bumped from 100 kHz to 400 kHz: the MPU data-ready ISR fires at ~200 Hz
+ * and each wake does an accel read (7 B) + optional DMP FIFO read (~47 B).
+ * At 100 kHz that would saturate the bus; 400 kHz gives comfortable headroom
+ * for the MAX30102 burst reads as well. Both chips are 400 kHz-rated. */
+#define I2C_MASTER_FREQ_HZ      400000U
 #define I2C_MASTER_PORT         I2C_NUM_0
 
 /* ---- UART1 (A7670E modem) -------------------------------------------- */
@@ -41,7 +45,17 @@ extern "C" {
 #define PIN_BUZZER              GPIO_NUM_10
 
 /* ---- Green status LED ------------------------------------------------ */
-#define PIN_GREEN_LED           GPIO_NUM_8
+/* Moved from GPIO8 to GPIO42 (one of the JTAG pins MTMS/MTDI/MTDO/MTCK =
+ * GPIO39-42). Since we don't use JTAG for debugging, those pins are free
+ * for general GPIO. GPIO8 is now used by the MAX30102 INT pin (see below). */
+#define PIN_GREEN_LED           GPIO_NUM_42
+
+/* ---- MAX30102 INT ---------------------------------------------------- */
+/* MAX30102's INT pin (open-drain, active-low). Fires on FIFO_A_FULL
+ * (17 samples queued), PPG_RDY (every sample), or PROX_INT (finger on/off).
+ * We use FIFO_A_FULL so the task can burst-read ~17 samples in one I2C
+ * transaction instead of polling 1-at-a-time. */
+#define PIN_MAX30102_INT        GPIO_NUM_8
 
 /* ---- Alert-abort button ---------------------------------------------- */
 /* Active-low (internal pull-up): pressed = GPIO reads 0. */
@@ -71,17 +85,22 @@ extern "C" {
 
 /* ---- Collision detection (raw accelerometer) -------------------------- */
 /* High-priority impact detector: reads raw accel X/Y/Z from the MPU6050
- * at COLLISION_SAMPLE_MS intervals and computes the magnitude vector.
- * If |a| >= COLLISION_THRESHOLD_G, BIT_COLLISION_DETECTED is set in the
- * event group, which the monitor task consumes to bypass the WARNING
- * phase and escalate directly to ALERT (immediate SMS path).
+ * on every data-ready interrupt (~200 Hz) and computes the magnitude
+ * vector. If |a| >= COLLISION_THRESHOLD_G, BIT_COLLISION_DETECTED is set
+ * in the event group, which the monitor task consumes to bypass the
+ * WARNING phase and escalate directly to ALERT (immediate SMS path).
+ *
+ * The collision check is performed inside mpu_int_task - the same task
+ * that drains the DMP FIFO. There's no separate collision_task: 
+ * the MPU has only one INT pin, so the data-ready interrupt drives both.
+ * A cooldown (COLLISION_COOLDOWN_MS) prevents a single physical impact
+ * from firing multiple events.
  *
  * The MPU6050 accel range is set to ±4g in mpu_setup() so that readings
  * above 2G don't saturate (the default ±2g range would clip at exactly
  * the trigger threshold on a single axis). ±4g gives 8192 LSB/g and
  * 2G of headroom above the trigger. */
 #define COLLISION_THRESHOLD_G   2.0f        /* total-magnitude trigger (g) */
-#define COLLISION_SAMPLE_MS     10U         /* 100 Hz polling */
 #define COLLISION_COOLDOWN_MS   3000U       /* min spacing between triggers */
 
 /* ---- Tuning constants ------------------------------------------------- */
