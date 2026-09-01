@@ -109,47 +109,30 @@ esp_err_t calibration_store_request_factory_reset(void)
 
 esp_err_t calibration_store_get_temp_baseline(float *out)
 {
-    if (!s_initialized || out == nullptr) return ESP_ERR_INVALID_STATE;
+    if (out == nullptr) return ESP_ERR_INVALID_ARG;
 
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS open(RO) for temp_base failed: %s", esp_err_to_name(err));
-        return err;
-    }
-    err = nvs_get_f32(h, NVS_KEY_TEMP_BASELINE, out);
+    if (err != ESP_OK) return err;
+
+    size_t sz = sizeof(float);
+    err = nvs_get_blob(h, NVS_KEY_TEMP_BASELINE, out, &sz);
+
     nvs_close(h);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGI(TAG, "no temp baseline in NVS (first boot)");
-    } else if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS read temp_base failed: %s", esp_err_to_name(err));
-    }
     return err;
 }
 
 esp_err_t calibration_store_set_temp_baseline(float val)
 {
-    if (!s_initialized) return ESP_ERR_INVALID_STATE;
-
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS open(RW) for temp_base failed: %s", esp_err_to_name(err));
-        return err;
-    }
-    err = nvs_set_f32(h, NVS_KEY_TEMP_BASELINE, val);
+    if (err != ESP_OK) return err;
+
+    err = nvs_set_blob(h, NVS_KEY_TEMP_BASELINE, &val, sizeof(float));
     if (err == ESP_OK) err = nvs_commit(h);
+
     nvs_close(h);
-
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS write temp_base failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    /* Mark the baseline as valid so future boots know to load it. */
-    calibration_store_set_flag(CAL_FLAG_TEMP_BASELINE_VALID);
-    ESP_LOGI(TAG, "temp baseline stored: %.2f C", (double)val);
-    return ESP_OK;
+    return err;
 }
 
 /* ---- Carrier + APN (strings) ----------------------------------------- */

@@ -1,5 +1,5 @@
 /**
- * max30102_algorithm.c — see max30102_algorithm.h for design notes.
+ * max30102_algorithm.c - see max30102_algorithm.h for design notes.
  */
 #include "max30102_algorithm.h"
 #include <math.h>
@@ -132,11 +132,30 @@ double max30102_alg_spo2(const int32_t *ir, const int32_t *red,
     double red_rms = rms_value(red);
     if (ir_mean == 0 || red_mean == 0) return 0.0;
 
-    /* R = (red_AC/red_DC) / (ir_AC/ir_DC); SpO2 ~= 49.7 * R is a coarse
-     * linearization that works for R in the typical 1.0–1.8 range. For
-     * higher accuracy replace with a calibrated quadratic. */
+    /* R = (red_AC/red_DC) / (ir_AC/ir_DC) - the standard ratio-of-ratios.
+     *
+     * Calibration curve: SpO2 = -45.06*R^2 + 30.354*R + 94.845. This is
+     * the quadratic that shipped (commented out!) in the reference repo
+     * this component was adapted from - its active line was the debug
+     * placeholder "SpO2 = 49.7*R", which is monotonically INCREASING in
+     * R, i.e. physiologically backwards: more red absorption relative to
+     * IR means MORE deoxyhemoglobin, so SpO2 must FALL as R rises.
+     *
+     * The symptom that uncovered it: ordinary finger values of R ~ 1.04
+     * to 1.07 mapped to the impossible "51.6–53.3 %" (49.7 * R), while
+     * genuinely good windows with R < 1.0 mapped below 50 % and were
+     * zeroed by the caller's plausibility gate - hence "SpO2 reads 51 to
+     * 53 % when it reads anything at all, 0 % otherwise".
+     *
+     * The quadratic maps the useful band sensibly:
+     *   R 0.5 -> ~98.8 %   R 0.7 -> ~94.0 %   R 0.9 -> ~85.7 %
+     * and falls off a cliff for R > 1.2, where the caller's
+     * physiological gate (< 70 % -> invalid) takes over. */
     double R = (red_rms / (double)red_mean) / (ir_rms / (double)ir_mean);
-    return 49.7 * R;
+    double spo2 = (-45.06 * R + 30.354) * R + 94.845;
+    if (spo2 > 100.0) spo2 = 100.0;
+    if (spo2 < 0.0)   spo2 = 0.0;
+    return spo2;
 }
 
 static double autocorrelation(const int32_t *data, int lag)
@@ -156,24 +175,35 @@ int max30102_alg_heart_rate(const int32_t *ir, double *r0, double *autocorr_out)
     if (r0) *r0 = r0_val;
     if (r0_val == 0.0) return 0;
 
-    double biggest = 0.0;
-    int    biggest_idx = 0;
-    bool   found = false;
+    /* Normalized autocorrelation for the whole window. */
+    double ac[MAX30102_ALG_BUFFER_SIZE];
+    for (int lag = 1; lag < MAX30102_ALG_BUFFER_SIZE; ++lag) {
+        ac[lag] = autocorrelation(ir, lag) / r0_val;
+        if (autocorr_out) autocorr_out[lag] = ac[lag];
+    }
 
-    /* Lags 11..125 correspond to ~487..43 bpm at 40 ms sample period —
-     * this is the plausible physiological range. */
-    for (int lag = 11; lag < 125 && lag < MAX30102_ALG_BUFFER_SIZE; ++lag) {
-        double r = autocorrelation(ir, lag) / r0_val;
-        if (autocorr_out) autocorr_out[lag] = r;
-        if (r > MINIMUM_RATIO && r > biggest) {
-            biggest = r;
-            biggest_idx = lag;
-            found = true;
+    /* Strongest LOCAL maximum inside the physiological band (lags 11..124
+     * correspond to ~487..29 bpm at 40 ms). The candidate peak must beat
+     * its immediate neighbours on both sides. A window with no pulse
+     * periodicity produces an autocorrelation curve that only decays
+     * from the left edge - it has no local maximum, so it now reports
+     * "no reading" (0). The previous plain global-max search picked that
+     * curve's leftmost point instead: lag 11 == 60/(11*0.040) == 136.4
+     * bpm, which is exactly why weak/noisy windows locked onto "136". */
+    double best = 0.0;
+    int    best_lag = 0;
+    for (int lag = 11; lag < 125 && lag < MAX30102_ALG_BUFFER_SIZE - 1; ++lag) {
+        double r = ac[lag];
+        if (r <= MINIMUM_RATIO) continue;
+        if (r < ac[lag - 1] || r < ac[lag + 1]) continue;
+        if (r > best) {
+            best     = r;
+            best_lag = lag;
         }
     }
 
-    if (!found) return 0;
-    double period_s = biggest_idx * (MAX30102_ALG_SAMPLE_MS / 1000.0);
+    if (best_lag == 0) return 0;
+    double period_s = best_lag * (MAX30102_ALG_SAMPLE_MS / 1000.0);
     if (period_s <= 0.0) return 0;
     return (int)(60.0 / period_s + 0.5);
 }

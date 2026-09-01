@@ -34,19 +34,32 @@ THE SOFTWARE.
 #ifndef _I2CDEV_H_
 #define _I2CDEV_H_
 
-#include <driver/i2c.h>
+/* Migrated to the modern ESP-IDF I2C master driver (driver/i2c_master.h).
+ * The legacy command-link API (driver/i2c.h) is deprecated as of IDF 5.2
+ * and printed a migration warning on every boot.
+ *
+ * Architecture:
+ *   - installBus() creates the shared master bus (called once from
+ *     main::i2c_bus_setup before any device talks).
+ *   - deviceHandle(addr) lazily registers a device handle per 7-bit
+ *     address and caches it, so the address-based I2Cdev API below can
+ *     stay unchanged - all hundred-plus call sites in MPU6050.cpp keep
+ *     working without modification.
+ *   - probe(addr) does a quick address-only scan, used at boot to give
+ *     one clear wiring diagnostic instead of hundreds of failed
+ *     transactions later during DMP load. */
 
-#define I2C_SDA_PORT gpioPortA
-#define I2C_SDA_PIN 0
-#define I2C_SDA_MODE gpioModeWiredAnd
-#define I2C_SDA_DOUT 1
-
-#define I2C_SCL_PORT gpioPortA
-#define I2C_SCL_PIN 1
-#define I2C_SCL_MODE gpioModeWiredAnd
-#define I2C_SCL_DOUT 1
+#include <driver/i2c_master.h>
 
 #define I2CDEV_DEFAULT_READ_TIMEOUT 1000
+/* Per-transaction timeout for the new driver API (milliseconds). */
+#define I2CDEV_XFER_TIMEOUT_MS      200
+/* Maximum distinct slave addresses we will cache handles for.
+ * Axion uses two (MPU6050 0x68, MAX30102 0x57) - 4 gives headroom. */
+#define I2CDEV_MAX_DEVICES          4
+/* Largest single write the class will accept (register byte + payload).
+ * DMP memory writes use 16-byte chunks; 64 leaves ample headroom. */
+#define I2CDEV_MAX_WRITE_LEN        64
 
 class I2Cdev {
     public:
@@ -54,6 +67,17 @@ class I2Cdev {
 
         static void initialize();
         static void enable(bool isEnabled);
+
+        /* ---- new-driver bus/device management ------------------------ */
+        /* Create the shared I2C master bus. Returns true on success
+         * (or if already installed). */
+        static bool installBus(int sda_gpio, int scl_gpio, uint32_t hz);
+        /* Handle for the shared bus (nullptr if installBus not called). */
+        static i2c_master_bus_handle_t busHandle();
+        /* Cached (or lazily created) device handle for a 7-bit address. */
+        static i2c_master_dev_handle_t deviceHandle(uint8_t devAddr);
+        /* Address-only probe: true if a device ACKs at devAddr. */
+        static bool probe(uint8_t devAddr);
 
         static int8_t readBit(uint8_t devAddr, uint8_t regAddr, uint8_t bitNum, uint8_t *data, uint16_t timeout=I2Cdev::readTimeout);
         //TODO static int8_t readBitW(uint8_t devAddr, uint8_t regAddr, uint8_t bitNum, uint16_t *data, uint16_t timeout=I2Cdev::readTimeout);

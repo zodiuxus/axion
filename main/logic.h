@@ -1,7 +1,4 @@
 #pragma once
-// yes, i know this isn't how it should
-// be normally done. i did it this way
-// because i was running out of time.
 #include <cmath>
 #ifndef AXION_LOGIC_H
 #define AXION_LOGIC_H

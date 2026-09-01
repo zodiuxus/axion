@@ -78,6 +78,17 @@ void axion_state_wait_any(uint32_t bits);
 /* Set ready-bits (used by sensor init tasks). */
 void axion_state_set_ready(uint32_t bits);
 
+/* ---- System arming gate ---------------------------------------------- */
+/* Collision escalation is suppressed until modem bring-up completes.
+ * Before that, a physical bump (mounting the box, bench handling) would
+ * fire an immediate ALERT that can't even be sent - the monitor task
+ * itself doesn't start until BIT_AT_READY. Detection still runs from
+ * boot and is logged by mpu_int_task; escalation becomes live when the
+ * modem task calls axion_state_set_armed(true). Lock-free (atomic):
+ * polled on every MPU interrupt wake. */
+void axion_state_set_armed(bool armed);
+bool axion_state_is_armed(void);
+
 /* Take a consistent snapshot of the shared state. Safe from any task. */
 void axion_state_snapshot(axion_state_t *out);
 

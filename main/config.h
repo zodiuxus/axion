@@ -54,7 +54,9 @@ extern "C" {
 /* MAX30102's INT pin (open-drain, active-low). Fires on FIFO_A_FULL
  * (17 samples queued), PPG_RDY (every sample), or PROX_INT (finger on/off).
  * We use FIFO_A_FULL so the task can burst-read ~17 samples in one I2C
- * transaction instead of polling 1-at-a-time. */
+ * transaction instead of polling 1-at-a-time.
+ *
+ * This pin was freed up by moving the green status LED off GPIO8. */
 #define PIN_MAX30102_INT        GPIO_NUM_8
 
 /* ---- Alert-abort button ---------------------------------------------- */
@@ -91,7 +93,7 @@ extern "C" {
  * WARNING phase and escalate directly to ALERT (immediate SMS path).
  *
  * The collision check is performed inside mpu_int_task - the same task
- * that drains the DMP FIFO. There's no separate collision_task: 
+ * that drains the DMP FIFO. There's no separate collision_task anymore:
  * the MPU has only one INT pin, so the data-ready interrupt drives both.
  * A cooldown (COLLISION_COOLDOWN_MS) prevents a single physical impact
  * from firing multiple events.
@@ -100,7 +102,7 @@ extern "C" {
  * above 2G don't saturate (the default ±2g range would clip at exactly
  * the trigger threshold on a single axis). ±4g gives 8192 LSB/g and
  * 2G of headroom above the trigger. */
-#define COLLISION_THRESHOLD_G   2.0f        /* total-magnitude trigger (g) */
+#define COLLISION_THRESHOLD_G   4.0f        /* total-magnitude trigger (g) */
 #define COLLISION_COOLDOWN_MS   3000U       /* min spacing between triggers */
 
 /* ---- Tuning constants ------------------------------------------------- */
@@ -124,7 +126,7 @@ extern "C" {
  * or factory reset), so the monitor always has a usable reference. */
 #define TEMP_HYPO_DELTA        0.7f    /* baseline - 0.7 = hypothermia trigger */
 #define TEMP_HYPER_DELTA       1.0f    /* baseline + 1.0 = hyperthermia trigger */
-#define TEMP_BASELINE_DEFAULT  36.5f   /* fallback if no calibrated baseline yet */
+#define TEMP_BASELINE_DEFAULT  35.0f   /* fallback if no calibrated baseline yet */
 
 /* Speed thresholds (m/s). */
 #define SPEED_STOPPED           0.5f

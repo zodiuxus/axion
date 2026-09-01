@@ -1,22 +1,23 @@
 #pragma once
 /**
- * max30102.h — Maxim MAX30102 pulse oximeter driver (clean component).
+ * max30102.h - Maxim MAX30102 pulse oximeter driver (clean component).
  *
  * Adapted from Gabriel-Gardin/max30102_esp32_oximeter with the following
  * changes:
  *   - Removed WiFi/MQTT coupling (this is a driver, not an app).
- *   - I2C port is passed in by the caller (no global).
+ *   - An i2c_master_dev_handle_t is passed in by the caller (no global).
  *   - `max_config` is no longer a global defined in a header (that was
  *     an ODR violation waiting to happen); instead a default is provided
  *     by max30102_default_config() and the caller may override fields.
- *   - Fixed `read_max30102_fifo` — the reference used `+=` and silently
+ *   - Fixed `read_max30102_fifo` - the reference used `+=` and silently
  *     accumulated garbage instead of overwriting.
- *   - Uses i2c_master_write_to_device / i2c_master_read_from_device
- *     helpers (cleaner than manual i2c_cmd_link).
+ *   - Migrated to the modern I2C master driver (driver/i2c_master.h):
+ *     i2c_master_transmit / i2c_master_transmit_receive.
  *
- * The driver does NOT install the I2C bus — the caller is responsible
- * for that. In Axion, the MPU6050 setup task installs I2C_NUM_0 first,
- * then max30102_init() attaches to the same bus.
+ * The driver does NOT install the I2C bus - the caller is responsible
+ * for that. In Axion, I2Cdev::installBus() (called from the MPU setup
+ * task) creates the shared bus first, then max30102_init() attaches to
+ * it via I2Cdev::deviceHandle(MAX30102_I2C_ADDR).
  */
 #ifndef MAX30102_H
 #define MAX30102_H
@@ -25,7 +26,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "esp_err.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -133,25 +134,59 @@ typedef struct {
 max30102_config_t max30102_default_config(void);
 
 /**
- * Initialize the MAX30102 on the given I2C port. The bus must already
- * be installed (e.g. by i2c_param_config + i2c_driver_install).
+ * Initialize the MAX30102 on the given I2C device handle. The bus must
+ * already be installed and the handle obtained (I2Cdev::installBus +
+ * I2Cdev::deviceHandle(MAX30102_I2C_ADDR)).
  */
-esp_err_t max30102_init(i2c_port_t port, const max30102_config_t *cfg);
+esp_err_t max30102_init(i2c_master_dev_handle_t dev, const max30102_config_t *cfg);
 
 /**
  * Read one FIFO sample (6 bytes: 3 for RED, 3 for IR).
  * Returns ESP_OK on success. *red and *ir are written as 18-bit values
  * (the sensor's native resolution at SPO2_ADC_RGE=01).
+ *
+ * Prefer max30102_read_fifo_burst() when servicing the FIFO_A_FULL
+ * interrupt - it reads all queued samples in a single I2C transaction
+ * instead of N separate ones.
  */
-esp_err_t max30102_read_fifo(i2c_port_t port, int32_t *red, int32_t *ir);
+esp_err_t max30102_read_fifo(i2c_master_dev_handle_t dev, int32_t *red, int32_t *ir);
+
+/**
+ * Burst-read up to `max_samples` FIFO samples in one I2C transaction.
+ * `*out_count` is set to the number of samples actually read (which is
+ * the smaller of max_samples and the FIFO occupancy at read time).
+ *
+ * Caller provides `red_out` / `ir_out` arrays of length `max_samples`.
+ * Each sample is an 18-bit unsigned value (the sensor's native width
+ * at SPO2_ADC_RGE=01).
+ *
+ * This is the preferred way to drain the FIFO from the FIFO_A_FULL
+ * interrupt handler - it cuts I2C bus traffic by ~6× compared to
+ * reading one sample at a time.
+ */
+esp_err_t max30102_read_fifo_burst(i2c_master_dev_handle_t dev,
+                                   int32_t *red_out, int32_t *ir_out,
+                                   size_t max_samples, size_t *out_count);
+
+/** Enable / disable the FIFO_A_FULL interrupt (fires when the FIFO is
+ *  ~75% full, i.e. 17 unread samples). The INT pin is open-drain and
+ *  active-low; the caller is responsible for wiring the GPIO ISR. */
+esp_err_t max30102_enable_fifo_a_full_int(i2c_master_dev_handle_t dev, bool enable);
+
+/** Read both interrupt status registers (REG_INTR_STATUS_1/2) and
+ *  return them. Reading clears latched bits. Bit 7 of status1 is
+ *  A_FULL (FIFO almost full); bit 6 is PPG_RDY; bit 5 is ALC_OVF;
+ *  bit 4 is PROX_INT. */
+esp_err_t max30102_read_int_status(i2c_master_dev_handle_t dev,
+                                   uint8_t *status1, uint8_t *status2);
 
 /** Trigger a die-temperature conversion, then read it.
  *  Returns the temperature in degrees Celsius (e.g. 25.6). */
-esp_err_t max30102_read_temp(i2c_port_t port, float *out_c);
+esp_err_t max30102_read_temp(i2c_master_dev_handle_t dev, float *out_c);
 
 /** Raw register access (handy for debugging). */
-esp_err_t max30102_write_reg(i2c_port_t port, uint8_t reg, uint8_t value);
-esp_err_t max30102_read_reg(i2c_port_t port, uint8_t reg, uint8_t *buf, size_t len);
+esp_err_t max30102_write_reg(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t value);
+esp_err_t max30102_read_reg(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *buf, size_t len);
 
 #ifdef __cplusplus
 }

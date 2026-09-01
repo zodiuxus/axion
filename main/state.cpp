@@ -3,6 +3,7 @@
  */
 #include "state.h"
 
+#include <atomic>
 #include <cstring>
 #include "freertos/semphr.h"
 #include "esp_log.h"
@@ -40,6 +41,20 @@ extern "C" void axion_state_wait_any(uint32_t bits)
 extern "C" void axion_state_set_ready(uint32_t bits)
 {
     xEventGroupSetBits(g_sensors_ready, bits);
+}
+
+/* System arming gate - atomic, no mutex: written once by the modem task
+ * and polled on every MPU interrupt wake (200 Hz). See state.h. */
+static std::atomic<bool> s_armed{false};
+
+extern "C" void axion_state_set_armed(bool armed)
+{
+    s_armed.store(armed);
+}
+
+extern "C" bool axion_state_is_armed(void)
+{
+    return s_armed.load();
 }
 
 extern "C" void axion_state_snapshot(axion_state_t *out)

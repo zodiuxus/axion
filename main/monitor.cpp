@@ -13,7 +13,7 @@
  *                                            re-enter WARNING while the
  *                                            user is still recovering.
  *
- *   BIT_COLLISION_DETECTED (2G+ impact)   - bypass the WARNING phase
+ *   BIT_COLLISION_DETECTED (4G+ impact)   - bypass the WARNING phase
  *                                            entirely and jump straight
  *                                            to ALERT. This is the
  *                                            highest-priority alert

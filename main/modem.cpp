@@ -143,7 +143,7 @@ static void gnss_power_up(void)
         vTaskDelay(pdMS_TO_TICKS(3000));
         at_command_send("AT+CGNSSPORTSWITCH=1,1", 3000, "OK");
         at_command_send("AT+CGNSSCOLD", 9000, "OK");
-        at_command_send("AT+CGNSSTST=1", 1000, "OK");
+        at_command_send("AT+CGNSSTST=0", 1000, "OK");
         at_command_send("AT+CGNSSMOD=?", 9000, "OK");
     }
     at_command_send("AT+CGNSSURC=0", 10000, "OK");
@@ -199,6 +199,18 @@ static bool wait_for_registration(uint32_t timeout_ms)
 /* ---- Public tasks --------------------------------------------------- */
 void modem_setup_task(void * /*arg*/)
 {
+    /* Install the UART driver + create the response mutex. MUST run
+     * before any at_command_send()/at_modem_flush_rx() call: without it
+     * s_uart_mutex/s_resp_buf are NULL and every command fails instantly
+     * (the old log misleadingly showed "UART mutex timeout" for each). */
+    esp_err_t uart_err = at_modem_init();
+    if (uart_err != ESP_OK) {
+        ESP_LOGE(TAG, "at_modem_init failed: %s - modem unusable this boot",
+                 esp_err_to_name(uart_err));
+        /* Continue anyway: the sensor stack works without the modem, and
+         * the monitor task gates on BIT_AT_READY which we never set. */
+    }
+
     ESP_LOGW(TAG, "Bringing up A7670E...");
     at_modem_flush_rx();
 
@@ -284,8 +296,14 @@ void modem_setup_task(void * /*arg*/)
     /* SMS text mode. */
     at_command_send("AT+CMGF=1", 9000, "OK");
 
-    axion_state_set_ready(BIT_AT_READY);
-    ESP_LOGI(TAG, "A7670E modem ready (SMS path available)");
+        axion_state_set_ready(BIT_AT_READY);
+    /* Arm collision escalation. The monitor task unblocks on BIT_AT_READY
+     * at the same moment, so from here on a collision alert can actually
+     * reach the SMS path. Impacts detected before this point (mounting
+     * bumps, bench handling) are logged by mpu_int_task but deliberately
+     * not escalated. */
+    axion_state_set_armed(true);
+    ESP_LOGI(TAG, "A7670E modem ready (SMS path available) - system armed");
 
     /* Power up GNSS now that the modem is registered. */
     gnss_power_up();

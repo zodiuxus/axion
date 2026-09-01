@@ -36,28 +36,14 @@ THE SOFTWARE.
 
 #include "MPU6050.h"
 #include <string.h>
+#include <stdio.h>
 
-#define I2C_NUM I2C_NUM_0
-
+/* ReadRegister: migrated to the modern driver via I2Cdev::readBytes (a
+ * single combined write-reg + repeated-start read transaction). The old
+ * implementation built a legacy command link by hand here. */
 void MPU6050::ReadRegister(uint8_t reg, uint8_t *data, uint8_t len){
-	uint8_t dev = 0x68;
-	i2c_cmd_handle_t cmd;
-	I2Cdev::SelectRegister(dev, reg);
-
-	cmd = i2c_cmd_link_create();
-	ESP_ERROR_CHECK(i2c_master_start(cmd));
-	ESP_ERROR_CHECK(i2c_master_write_byte(cmd, (dev << 1) | I2C_MASTER_READ, 1));
-
-	if(len>1)
-		ESP_ERROR_CHECK(i2c_master_read(cmd, data, len, I2C_MASTER_ACK));
-
-	ESP_ERROR_CHECK(i2c_master_read_byte(cmd, data+len-1, I2C_MASTER_NACK));
-
-	ESP_ERROR_CHECK(i2c_master_stop(cmd));
-	ESP_ERROR_CHECK(i2c_master_cmd_begin(I2C_NUM, cmd, 1000));
-	i2c_cmd_link_delete(cmd);
+    I2Cdev::readBytes(devAddr, reg, len, data);
 }
-
 
 /** Default constructor, uses default I2C address.
  * @see MPU6050_DEFAULT_ADDRESS
@@ -3104,12 +3090,16 @@ bool MPU6050::writeMemoryBlock(const uint8_t *data, uint16_t dataSize, uint8_t b
                 }
                 printf("\nReceived:");
                 for (uint8_t j = 0; j < chunkSize; j++) {
-                    printf("%#04x", verifyBuffer[i + j]);
+                    printf("%#04x", verifyBuffer[j]);
                 }
                 printf("\n");
-                //free(verifyBuffer);
-                //if (useProgMem) free(progBuffer);
-                //return false; // uh oh.
+                /* Fail fast: a verification mismatch means the DMP image
+                 * in the chip's memory banks is corrupt. The previous
+                 * behaviour (commented-out return) limped forward with a
+                 * broken DMP, producing nonsense quaternions later. */
+                free(verifyBuffer);
+                if (useProgMem) free(progBuffer);
+                return false; // uh oh.
             }
         }
 

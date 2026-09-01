@@ -1,7 +1,8 @@
 /**
- * max30102.c — Driver implementation. See max30102.h for design notes.
+ * max30102.c - Driver implementation. See max30102.h for design notes.
  */
 #include "max30102.h"
+#include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -44,21 +45,19 @@ max30102_config_t max30102_default_config(void)
     return cfg;
 }
 
-esp_err_t max30102_write_reg(i2c_port_t port, uint8_t reg, uint8_t value)
+esp_err_t max30102_write_reg(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t value)
 {
     uint8_t buf[2] = { reg, value };
-    return i2c_master_write_to_device(port, MAX30102_I2C_ADDR, buf, sizeof(buf),
-                                      pdMS_TO_TICKS(1000));
+    return i2c_master_transmit(dev, buf, sizeof(buf), pdMS_TO_TICKS(1000));
 }
 
-esp_err_t max30102_read_reg(i2c_port_t port, uint8_t reg, uint8_t *buf, size_t len)
+esp_err_t max30102_read_reg(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *buf, size_t len)
 {
-    return i2c_master_write_read_device(port, MAX30102_I2C_ADDR,
-                                        &reg, 1, buf, len,
-                                        pdMS_TO_TICKS(1000));
+    return i2c_master_transmit_receive(dev, &reg, 1, buf, len,
+                                       pdMS_TO_TICKS(1000));
 }
 
-esp_err_t max30102_init(i2c_port_t port, const max30102_config_t *cfg)
+esp_err_t max30102_init(i2c_master_dev_handle_t dev, const max30102_config_t *cfg)
 {
     max30102_config_t local_cfg;
     if (cfg == NULL) {
@@ -69,13 +68,13 @@ esp_err_t max30102_init(i2c_port_t port, const max30102_config_t *cfg)
     esp_err_t err;
 
     /* Reset the device first so we start from a known state. */
-    err = max30102_write_reg(port, REG_MODE_CONFIG, 0b01000000); /* RESET=1 */
+    err = max30102_write_reg(dev, REG_MODE_CONFIG, 0b01000000); /* RESET=1 */
     if (err != ESP_OK) return err;
     vTaskDelay(pdMS_TO_TICKS(10));
 
     /* Clear interrupt status registers (read-to-clear). */
     uint8_t tmp[2] = {0};
-    max30102_read_reg(port, REG_INTR_STATUS_1, tmp, 2);
+    max30102_read_reg(dev, REG_INTR_STATUS_1, tmp, 2);
 
     /* Write all config registers in the same order the reference did.
      * We access each register via the per-union byte view (dataN). */
@@ -94,22 +93,21 @@ esp_err_t max30102_init(i2c_port_t port, const max30102_config_t *cfg)
         { REG_MULTI_LED_CTRL2, cfg->data13 },
     };
     for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); ++i) {
-        err = max30102_write_reg(port, regs[i][0], regs[i][1]);
+        err = max30102_write_reg(dev, regs[i][0], regs[i][1]);
         if (err != ESP_OK) return err;
     }
 
     return ESP_OK;
 }
 
-esp_err_t max30102_read_fifo(i2c_port_t port, int32_t *red, int32_t *ir)
+esp_err_t max30102_read_fifo(i2c_master_dev_handle_t dev, int32_t *red, int32_t *ir)
 {
     if (red == NULL || ir == NULL) return ESP_ERR_INVALID_ARG;
 
     uint8_t raw[6] = {0};
     uint8_t reg    = REG_FIFO_DATA;
-    esp_err_t err = i2c_master_write_read_device(port, MAX30102_I2C_ADDR,
-                                                 &reg, 1, raw, sizeof(raw),
-                                                 pdMS_TO_TICKS(1000));
+    esp_err_t err = i2c_master_transmit_receive(dev, &reg, 1, raw, sizeof(raw),
+                                                pdMS_TO_TICKS(1000));
     if (err != ESP_OK) return err;
 
     /* MAX30102 FIFO data is 18-bit, MSB first, top 2 bits always 0. */
@@ -122,19 +120,103 @@ esp_err_t max30102_read_fifo(i2c_port_t port, int32_t *red, int32_t *ir)
     return ESP_OK;
 }
 
-esp_err_t max30102_read_temp(i2c_port_t port, float *out_c)
+esp_err_t max30102_read_fifo_burst(i2c_master_dev_handle_t dev,
+                                   int32_t *red_out, int32_t *ir_out,
+                                   size_t max_samples, size_t *out_count)
+{
+    if (red_out == NULL || ir_out == NULL || out_count == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (max_samples == 0) {
+        *out_count = 0;
+        return ESP_OK;
+    }
+
+    /* Determine how many samples are actually in the FIFO. */
+    uint8_t wr_ptr = 0, rd_ptr = 0;
+    esp_err_t err;
+    err = max30102_read_reg(dev, REG_FIFO_WR_PTR, &wr_ptr, 1);
+    if (err != ESP_OK) return err;
+    err = max30102_read_reg(dev, REG_FIFO_RD_PTR, &rd_ptr, 1);
+    if (err != ESP_OK) return err;
+
+    wr_ptr &= 0x1F;
+    rd_ptr &= 0x1F;
+    size_t avail = (wr_ptr >= rd_ptr)
+                   ? (size_t)(wr_ptr - rd_ptr)
+                   : (size_t)(32 - rd_ptr + wr_ptr);
+    size_t n = (avail < max_samples) ? avail : max_samples;
+    if (n == 0) {
+        *out_count = 0;
+        return ESP_OK;
+    }
+
+    /* Single I2C transaction: write REG_FIFO_DATA, then read n*6 bytes.
+     * The MAX30102 auto-increments the FIFO read pointer on each byte
+     * read, so this drains exactly n samples in one burst. */
+    size_t byte_count = n * 6;
+    uint8_t *buf = (uint8_t *)malloc(byte_count);
+    if (buf == NULL) return ESP_ERR_NO_MEM;
+
+    uint8_t reg = REG_FIFO_DATA;
+    err = i2c_master_transmit_receive(dev, &reg, 1, buf, byte_count,
+                                      pdMS_TO_TICKS(1000));
+    if (err != ESP_OK) {
+        free(buf);
+        return err;
+    }
+
+    for (size_t i = 0; i < n; ++i) {
+        const uint8_t *s = buf + i * 6;
+        red_out[i] = ((int32_t)(s[0] & 0x03) << 16) |
+                     ((int32_t)s[1] << 8) |
+                      (int32_t)s[2];
+        ir_out[i]  = ((int32_t)(s[3] & 0x03) << 16) |
+                     ((int32_t)s[4] << 8) |
+                      (int32_t)s[5];
+    }
+    free(buf);
+    *out_count = n;
+    return ESP_OK;
+}
+
+esp_err_t max30102_enable_fifo_a_full_int(i2c_master_dev_handle_t dev, bool enable)
+{
+    /* REG_INTR_ENABLE_1 bit 7 = A_FULL_EN. Read-modify-write to preserve
+     * the other interrupt enables (PPG_RDY, PROX, etc.) - though we
+     * currently only use A_FULL. */
+    uint8_t cur = 0;
+    esp_err_t err = max30102_read_reg(dev, REG_INTR_ENABLE_1, &cur, 1);
+    if (err != ESP_OK) return err;
+    if (enable) cur |=  (1u << 7);
+    else        cur &= ~(1u << 7);
+    return max30102_write_reg(dev, REG_INTR_ENABLE_1, cur);
+}
+
+esp_err_t max30102_read_int_status(i2c_master_dev_handle_t dev,
+                                   uint8_t *status1, uint8_t *status2)
+{
+    uint8_t buf[2] = {0};
+    esp_err_t err = max30102_read_reg(dev, REG_INTR_STATUS_1, buf, 2);
+    if (err != ESP_OK) return err;
+    if (status1) *status1 = buf[0];
+    if (status2) *status2 = buf[1];
+    return ESP_OK;
+}
+
+esp_err_t max30102_read_temp(i2c_master_dev_handle_t dev, float *out_c)
 {
     if (out_c == NULL) return ESP_ERR_INVALID_ARG;
 
     /* Trigger a temperature conversion. */
-    esp_err_t err = max30102_write_reg(port, REG_TEMP_CONFIG, 0x01);
+    esp_err_t err = max30102_write_reg(dev, REG_TEMP_CONFIG, 0x01);
     if (err != ESP_OK) return err;
     vTaskDelay(pdMS_TO_TICKS(10));
 
     uint8_t intr = 0, frac = 0;
-    err = max30102_read_reg(port, REG_TEMP_INTR, &intr, 1);
+    err = max30102_read_reg(dev, REG_TEMP_INTR, &intr, 1);
     if (err != ESP_OK) return err;
-    err = max30102_read_reg(port, REG_TEMP_FRAC, &frac, 1);
+    err = max30102_read_reg(dev, REG_TEMP_FRAC, &frac, 1);
     if (err != ESP_OK) return err;
 
     /* Intr is the integer part (signed two's complement in 8 bits);

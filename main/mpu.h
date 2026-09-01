@@ -9,10 +9,10 @@
  * is no separate collision_task anymore.
  *
  * Flow:
- *   MPU INT (GPIO7) -> ISR -> notifies mpu_int_task
- *                                |- reads INT_STATUS
- *                                |- reads raw accel → collision check
- *                                |- if DMP packet ready: reads FIFO → YPR
+ *   MPU INT (GPIO7) ─► ISR ─► notifies mpu_int_task
+ *                                ├─ reads INT_STATUS
+ *                                ├─ reads raw accel → collision check
+ *                                └─ if DMP packet ready: reads FIFO → YPR
  *
  * The data-ready interrupt fires at the sensor sample rate (200 Hz -
  * see mpu_setup(), where SMPLRT_DIV is set to 4). The DMP writes its

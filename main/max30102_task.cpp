@@ -1,5 +1,6 @@
 /**
- * max30102_task.cpp - Oximetry sampling + estimation task (interrupt-driven).
+ * max30102_task.cpp - Oximetry sampling + estimation task (interrupt-driven
+ * with a poll fallback).
  *
  * On first run (CAL_FLAG_FIRST_RUN set in NVS), the task enters a
  * 2-minute calibration window after the first valid HR/SpO2 estimate.
@@ -13,15 +14,35 @@
  * The CAL_FLAG_FIRST_RUN flag is cleared by the status LED task once
  * ALL sensors have set their BIT_*_CALIBRATED bits.
  *
- * ---- Interrupt-driven FIFO drain ---------------------------------------
- * Previously this task polled max30102_read_fifo() in a tight loop with
- * a vTaskDelay(40 ms) between samples - 128 separate I2C transactions
- * per analysis window. Now it waits on PIN_MAX30102_INT (FIFO_A_FULL,
- * fires at ~17 samples queued), then burst-reads all available samples
- * in a single I2C transaction. The 128-sample analysis buffer fills in
- * ~8 interrupt wakes instead of 128 polling iterations, and I2C bus
- * traffic drops ~6×.
+ * ---- Interrupt-driven FIFO drain (with poll fallback) ------------------
+ * The primary wake source is the FIFO_A_FULL interrupt on
+ * PIN_MAX30102_INT (fires when 17 samples are unread - every ~340 ms at
+ * the effective 50 sps of 200 sps / 4x averaging), then the task
+ * burst-reads all available samples in a single I2C transaction.
+ *
+ * The wait has a 250 ms timeout. A healthy interrupt path always beats
+ * the timeout; if the edge is ever lost - INT wire off or misplaced,
+ * missed edge, stuck line - the timeout path still drains the FIFO 4x
+ * per second, which the 32-deep FIFO absorbs without overflow (it fills
+ * in ~640 ms). So a dead INT line costs sampling latency, not data.
+ * When the timeout path fires with an empty FIFO, a throttled
+ * diagnostic line distinguishes "sensor sampling but INT never arrives"
+ * (check the INT wire) from "sensor not sampling at all" (check mode
+ * config / LED currents).
+ *
+ * ---- Optical bring-up diagnostics --------------------------------------
+ * "Is the sensor even working?" is answerable from the log alone:
+ *   - init logs the DIE TEMPERATURE (proves silicon is converting,
+ *     not just ACKing on I2C),
+ *   - the first analysis window (and every 10th invalid window) logs
+ *     the raw IR/RED envelope [min..max, mean]. Interpretation:
+ *       flat & near constant          -> no light / no coupling
+ *                                        (LEDs off, RD/IRD floating?)
+ *       low values, flat              -> LEDs firing, no finger
+ *       level jumps when finger lands -> healthy optical path
+ *       max at 262143                 -> detector saturated
  */
+
 #include "max30102_task.h"
 
 #include <cstdio>
@@ -35,6 +56,7 @@
 
 #include "max30102.h"
 #include "max30102_algorithm.h"
+#include "I2Cdev.h"
 
 #include "config.h"
 #include "state.h"
@@ -60,8 +82,18 @@ void max30102_task(void * /*arg*/)
      * BIT_MPU_READY since the MPU setup task runs after i2c_bus_setup). */
     axion_state_wait_all(BIT_MPU_READY);
 
+    /* Handle for our 0x57 device on the shared bus (cached by I2Cdev). */
+    i2c_master_dev_handle_t max_dev = I2Cdev::deviceHandle(MAX30102_I2C_ADDR);
+    if (max_dev == nullptr) {
+        ESP_LOGE(TAG, "no I2C device handle for MAX30102 (0x%02x)",
+                 MAX30102_I2C_ADDR);
+        axion_state_set_ready(BIT_OXIM_CALIBRATED);
+        vTaskDelete(nullptr);
+        return;
+    }
+
     max30102_config_t cfg = max30102_default_config();
-    esp_err_t err = max30102_init(I2C_MASTER_PORT, &cfg);
+    esp_err_t err = max30102_init(max_dev, &cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "max30102_init failed: %s - marking calibrated and exiting",
                  esp_err_to_name(err));
@@ -71,32 +103,47 @@ void max30102_task(void * /*arg*/)
         return;
     }
     max30102_alg_init();
-    ESP_LOGI(TAG, "MAX30102 initialized on I2C port %d", I2C_MASTER_PORT);
+    ESP_LOGI(TAG, "MAX30102 initialized (0x%02x on shared I2C bus)",
+             MAX30102_I2C_ADDR);
+
+    /* Die temperature: proves the silicon is alive beyond a bare I2C
+     * ACK - the on-die sensor requires working internal conversion to
+     * produce this. Should read close to ambient (a degree or two above
+     * once the LEDs have been running). */
+    float die_temp = 0.0f;
+    if (max30102_read_temp(max_dev, &die_temp) == ESP_OK) {
+        ESP_LOGI(TAG, "die temp: %.1f C (expected near ambient)",
+                 (double)die_temp);
+    } else {
+        ESP_LOGW(TAG, "die temp read failed - chip ACKs but conversion "
+                      "path suspect");
+    }
 
     /* Enable the FIFO_A_FULL interrupt and wire up the GPIO ISR. The
      * MAX30102 INT pin is open-drain, active-low. We trigger on the
      * falling edge (assertion). Reading the INT_STATUS register clears
-     * the interrupt and deasserts the pin. */
-    err = max30102_enable_fifo_a_full_int(I2C_MASTER_PORT, true);
+     * the interrupt and deasserts the pin. If this write fails (or the
+     * INT wire is missing entirely), the 250 ms wait timeout in the
+     * main loop below degrades to a poll and sampling continues. */
+    err = max30102_enable_fifo_a_full_int(max_dev, true);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "FIFO_A_FULL int enable failed: %s - falling back to poll",
+        ESP_LOGW(TAG, "FIFO_A_FULL int enable failed: %s - "
+                      "poll fallback will drive sampling",
                  esp_err_to_name(err));
     }
 
     /* Clear any latched interrupt status before arming the GPIO. */
     uint8_t s1 = 0, s2 = 0;
-    max30102_read_int_status(I2C_MASTER_PORT, &s1, &s2);
+    max30102_read_int_status(max_dev, &s1, &s2);
 
     s_max30102_task_handle = xTaskGetCurrentTaskHandle();
 
     gpio_reset_pin(PIN_MAX30102_INT);
     gpio_set_direction(PIN_MAX30102_INT, GPIO_MODE_INPUT);
     gpio_pullup_en(PIN_MAX30102_INT);   /* open-drain needs a pull-up */
-    esp_err_t isr_err = gpio_install_isr_service(0);
-    if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "gpio_install_isr_service: %s", esp_err_to_name(isr_err));
-    }
-    isr_err = gpio_isr_handler_add(PIN_MAX30102_INT, max30102_int_isr, nullptr);
+    /* The GPIO ISR service is installed once, centrally, in app_main
+     * (axion.cpp); we only attach our handler here. */
+    esp_err_t isr_err = gpio_isr_handler_add(PIN_MAX30102_INT, max30102_int_isr, nullptr);
     if (isr_err != ESP_OK) {
         ESP_LOGE(TAG, "gpio_isr_handler_add: %s", esp_err_to_name(isr_err));
     }
@@ -128,29 +175,88 @@ void max30102_task(void * /*arg*/)
     int32_t red_burst[32];
     int32_t ir_burst[32];
 
+    /* Consecutive poll-timeout wakeups that produced nothing. 40 in a
+     * row (~10 s) triggers the throttled INT diagnostics below. */
+    int silent_polls = 0;
+
+    /* Raw-signal envelope stats for the current analysis window - see
+     * the bring-up diagnostics inside the window-fill branch. */
+    int32_t ir_min = 0, ir_max = 0, ir_sum = 0;
+    int32_t red_min = 0, red_max = 0, red_sum = 0;
+    int     invalid_windows = 0;
+
     while (true) {
         /* Block until the FIFO_A_FULL ISR notifies us. pdTRUE collapses
-         * back-to-back interrupts into a single wake. */
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+         * back-to-back interrupts into a single wake. The 250 ms timeout
+         * is the poll fallback: a healthy INT beats it every time; a
+         * dead INT path still gets the FIFO drained 4x per second. */
+        BaseType_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250));
 
         /* Clear the interrupt (read-to-clear) so the INT pin deasserts. */
-        max30102_read_int_status(I2C_MASTER_PORT, &s1, &s2);
+        max30102_read_int_status(max_dev, &s1, &s2);
 
         /* Burst-read whatever's in the FIFO (up to 32 samples). */
         size_t n = 0;
-        err = max30102_read_fifo_burst(I2C_MASTER_PORT,
+        err = max30102_read_fifo_burst(max_dev,
                                        red_burst, ir_burst, 32, &n);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "burst read failed: %s", esp_err_to_name(err));
             continue;
         }
-        if (n == 0) continue;
+        if (n == 0) {
+            /* Nothing to drain. If we were ALSO not notified, the
+             * interrupt path is suspect - keep sampling via the poll,
+             * but say so (throttled to once per ~10 s) with enough
+             * detail to pinpoint the fault:
+             *   - FIFO has data  -> sensor samples fine, INT never
+             *     arrives: check the INT wire to GPIO 8.
+             *   - FIFO empty     -> chip is not sampling at all:
+             *     check MODE_CONFIG / LED currents / red LED glow. */
+            if (!notified && ++silent_polls >= 40) {
+                uint8_t wr = 0, rd = 0, ovf = 0, mode = 0;
+                max30102_read_reg(max_dev, REG_FIFO_WR_PTR, &wr, 1);
+                max30102_read_reg(max_dev, REG_FIFO_RD_PTR, &rd, 1);
+                max30102_read_reg(max_dev, REG_OVF_COUNTER, &ovf, 1);
+                max30102_read_reg(max_dev, REG_MODE_CONFIG, &mode, 1);
+                if (wr != rd || ovf != 0) {
+                    ESP_LOGW(TAG, "no INT for ~10 s but FIFO has data "
+                             "(wr=%u rd=%u ovf=%u int_gpio=%d) - "
+                             "check the INT wire to GPIO %d",
+                             wr, rd, ovf,
+                             gpio_get_level(PIN_MAX30102_INT),
+                             PIN_MAX30102_INT);
+                } else {
+                    ESP_LOGW(TAG, "no INT for ~10 s and FIFO empty "
+                             "(mode=0x%02x int_gpio=%d) - sensor not "
+                             "sampling",
+                             mode, gpio_get_level(PIN_MAX30102_INT));
+                }
+                silent_polls = 0;
+            }
+            continue;
+        }
+        silent_polls = 0;
 
         /* Copy the burst into the analysis buffer. When the analysis
-         * buffer fills, run the algorithm and reset. */
+         * buffer fills, run the algorithm and reset. Per-sample raw
+         * min/max/sum are tracked for the diagnostics below. */
         for (size_t i = 0; i < n; ++i) {
-            ir_buf[buf_idx]  = ir_burst[i];
-            red_buf[buf_idx] = red_burst[i];
+            int32_t ir_s  = ir_burst[i];
+            int32_t red_s = red_burst[i];
+            if (buf_idx == 0) {
+                ir_min  = ir_max  = ir_s;
+                red_min = red_max = red_s;
+                ir_sum  = 0;
+                red_sum = 0;
+            }
+            if (ir_s  < ir_min)  ir_min  = ir_s;
+            if (ir_s  > ir_max)  ir_max  = ir_s;
+            if (red_s < red_min) red_min = red_s;
+            if (red_s > red_max) red_max = red_s;
+            ir_sum  += ir_s;
+            red_sum += red_s;
+            ir_buf[buf_idx]  = ir_s;
+            red_buf[buf_idx] = red_s;
             buf_idx++;
             if (buf_idx < MAX30102_BUFFER_SIZE) continue;
 
@@ -169,8 +275,32 @@ void max30102_task(void * /*arg*/)
                                                      ir_mean, red_mean)
                           : 0.0f;
 
+            /* Physiological plausibility gate. The calibration curve is
+             * monotonically decreasing, and this is an uncalibrated
+             * hobby-grade estimate: for a live finger anything under
+             * 70 % is estimate noise, not real hypoxia - report
+             * "invalid" (0) rather than an alarming number. (The old
+             * 50 % floor was tuned to the previous INVERTED 49.7*R
+             * curve, where it silently zeroed every good window with
+             * R < 1.0 - the exact cause of "SpO2 is 0 almost always,
+             * 51–53 % when it shows anything".) */
             if (spo2 > 100.0f) spo2 = 100.0f;
-            if (spo2 < 50.0f)  spo2 = 0.0f;
+            if (spo2 < 70.0f)  spo2 = 0.0f;
+
+            /* ---- Bring-up diagnostics: raw optical envelope ----
+             * Flat & constant  -> no light / no coupling (LEDs off?)
+             * Low, flat        -> LEDs firing, no finger on sensor
+             * Jumps with finger, max-min spread grows -> healthy
+             * max == 262143    -> ADC saturated (too much light) */
+            if (!valid) invalid_windows++;
+            if (first_window || (!valid && (invalid_windows % 10) == 1)) {
+                ESP_LOGI(TAG, "raw ir[%ld..%ld mean %ld] "
+                               "red[%ld..%ld mean %ld]",
+                         (long)ir_min, (long)ir_max,
+                         (long)(ir_sum / MAX30102_BUFFER_SIZE),
+                         (long)red_min, (long)red_max,
+                         (long)(red_sum / MAX30102_BUFFER_SIZE));
+            }
 
             axion_state_set_oximetry(hr, spo2, valid);
 

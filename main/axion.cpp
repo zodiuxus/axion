@@ -4,7 +4,7 @@
  * Wires up the Axion firmware:
  *   1. Initializes shared state + event group.
  *   2. Initializes NVS (for the calibration_store bitfield).
- *   3. Installs the alert-abort button ISR.
+ *   3. Installs the GPIO ISR service + the alert-abort button ISR.
  *   4. Spawns one setup task per peripheral (I2C bus, MPU, modem, temp).
  *   5. Spawns the long-running workers (mpu_int, gnss, oximetry, monitor,
  *      status LED, optional console).
@@ -23,6 +23,8 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "driver/gpio.h"
+#include "esp_err.h"
 #include "esp_log.h"
 
 #include "config.h"
@@ -56,11 +58,24 @@ extern "C" void app_main(void)
     /* ---- Core init (must come before any task that uses state/NVS) ---- */
     axion_state_init();
     calibration_store_init();
+
+    /* One GPIO ISR service for the whole app, installed before any module
+     * init. The alert button, MPU INT, and MAX30102 INT attach their
+     * handlers with gpio_isr_handler_add() only - calling
+     * gpio_install_isr_service() a second time returns
+     * ESP_ERR_INVALID_STATE and, worse, the IDF driver itself logs
+     * "GPIO isr service already installed" at ERROR level even when the
+     * caller handles the code gracefully. */
+    esp_err_t isr_err = gpio_install_isr_service(0);
+    if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "gpio_install_isr_service: %s", esp_err_to_name(isr_err));
+    }
+
     alert_button_init();
 
     /* ---- One-shot setup tasks (delete themselves when done) ---------- */
     xTaskCreate(temperature_task,      "ds18b20",   4096, nullptr, 1, nullptr);
-    xTaskCreate([](void *a){ i2c_bus_setup(); },   "i2c",      2048, nullptr, 1, nullptr);
+    xTaskCreate([](void *a){ i2c_bus_setup(); },   "i2c_init",      3072, nullptr, 1, nullptr);
     xTaskCreate([](void *a){ mpu_setup(); },       "mpu_init", 4096, nullptr, 1, nullptr);
     xTaskCreate(modem_setup_task,      "modem",     8192, nullptr, 1, nullptr);
 
@@ -75,7 +90,7 @@ extern "C" void app_main(void)
     xTaskCreate(status_led_task,       "status_led",2048, nullptr, 1, nullptr);
 
     /* Uncomment to enable the live console output (ANSI-aware terminal). */
-    // xTaskCreate(console_task,       "console",   4096, nullptr, 0, nullptr);
+    xTaskCreate(console_task,       "console",   4096, nullptr, 0, nullptr);
 
     ESP_LOGI(TAG, "All tasks spawned. Setup tasks will report when ready.");
 }

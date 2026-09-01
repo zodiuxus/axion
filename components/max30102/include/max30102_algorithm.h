@@ -1,6 +1,6 @@
 #pragma once
 /**
- * max30102_algorithm.h — Heart-rate & SpO2 estimation from a buffer of
+ * max30102_algorithm.h - Heart-rate & SpO2 estimation from a buffer of
  * MAX30102 RED/IR samples.
  *
  * Adapted from Gabriel-Gardin/max30102_esp32_oximeter/algorithm.{c,h}.
@@ -15,7 +15,7 @@
  *   - Unused `time` accumulator removed from `sum_of_squared_elements`.
  *   - `calculate_heart_rate` no longer overwrites `resultado` on every
  *     iteration before a peak is found (was returning 333 bpm on no
- *     signal — replaced with a sentinel return of 0).
+ *     signal - replaced with a sentinel return of 0).
  *   - `remove_dc_part` now uses signed accumulation (the reference used
  *     uint64_t, which produced wrong results for negative DC offsets).
  */

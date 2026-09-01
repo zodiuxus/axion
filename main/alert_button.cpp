@@ -56,16 +56,9 @@ void alert_button_init(void)
 
     s_button_queue = xQueueCreate(8, sizeof(int64_t));
 
-    /* Install the GPIO ISR service if not already installed (other
-     * modules might have done it first - that's fine, we ignore the
-     * "already installed" return code). */
-    esp_err_t isr_err = gpio_install_isr_service(0);
-    if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "gpio_install_isr_service: %s", esp_err_to_name(isr_err));
-        return;
-    }
-
-    isr_err = gpio_isr_handler_add(PIN_ALERT_BUTTON, button_isr, nullptr);
+    /* The GPIO ISR service is installed once, centrally, in app_main
+     * (axion.cpp); we only attach our handler here. */
+    esp_err_t isr_err = gpio_isr_handler_add(PIN_ALERT_BUTTON, button_isr, nullptr);
     if (isr_err != ESP_OK) {
         ESP_LOGE(TAG, "gpio_isr_handler_add: %s", esp_err_to_name(isr_err));
         return;
