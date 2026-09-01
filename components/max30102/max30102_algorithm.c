@@ -166,6 +166,13 @@ static double autocorrelation(const int32_t *data, int lag)
     for (int i = 0; i < n; ++i) {
         sum += (double)data[i] * (double)data[i + lag];
     }
+    /* Divide by the FULL window (N), not the overlap count (n): this is
+     * the biased autocorrelation estimator, and the (N-lag)/N shrinkage
+     * is deliberate - it weights down long lags, where only a few
+     * overlapping samples make the estimate pure noise. With the lag
+     * search spanning 11..124, the unbiased form (divide by n) lets
+     * long-lag noise peaks rival the true period peak and the estimator
+     * locks onto nonsense (~13 bpm). Keep the N divisor. */
     return sum / (double)MAX30102_ALG_BUFFER_SIZE;
 }
 

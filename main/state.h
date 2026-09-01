@@ -59,11 +59,21 @@ typedef struct {
     /* Body temperature (DS18B20). */
     float temp_c;
     float temp_baseline;   /* calibrated normal body temp (°C); TEMP_BASELINE_DEFAULT until calibrated */
+    bool temp_baseline_valid; /* true only once a calibrated baseline was
+                                 loaded from NVS or measured - until then,
+                                 the monitor MUST NOT treat the temp as abnormal */
 
     /* Oximetry (MAX30102). */
     int   heart_rate;   /* bpm */
     float spo2;         /* percent */
     bool  spo2_valid;   /* false if correlation too low or finger off */
+    uint32_t oxim_seq;  /* incremented on EVERY completed analysis window
+                         * (valid or not). The monitor polls state every
+                         * 100 ms but must evaluate each 5.12 s window
+                         * exactly once - a change in this counter marks
+                         * a fresh window, so per-window debouncing
+                         * counts windows, not polls. */
+
 } axion_state_t;
 
 /* Initialize the state mutex + event group. Call once from app_main. */

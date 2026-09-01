@@ -126,7 +126,35 @@ extern "C" {
  * or factory reset), so the monitor always has a usable reference. */
 #define TEMP_HYPO_DELTA        0.7f    /* baseline - 0.7 = hypothermia trigger */
 #define TEMP_HYPER_DELTA       1.0f    /* baseline + 1.0 = hyperthermia trigger */
-#define TEMP_BASELINE_DEFAULT  35.0f   /* fallback if no calibrated baseline yet */
+
+/* ---- Heart rate / SpO2 alert thresholds ------------------------------- */
+/* The band is deliberately wide because this is an uncalibrated
+ * estimator, not a medical monitor. Observed resting windows on this
+ * exact device run 54-79 bpm, so the bradycardia floor must sit well
+ * under clinical 60 to avoid paging on a normal resting heart; 40 bpm
+ * is still above the estimator's own 30 bpm validity floor, so a real
+ * slow rhythm is reported as a VALID window and can trip the alert.
+ * 120 bpm = sustained-dangerous tachycardia, above ordinary walking HR
+ * (which also pollutes PPG with motion artifact anyway). */
+#define HR_LOW_THRESHOLD        40      /* bpm - bradycardia alert floor */
+#define HR_HIGH_THRESHOLD       120     /* bpm - tachycardia alert ceiling */
+/* Standard hypoxemia cutoff. The estimator zeroes anything under 70 %
+ * as untrustworthy curve noise, so the practically detectable abnormal
+ * band is [70, 90) %. */
+#define SPO2_LOW_THRESHOLD      90.0f   /* % - hypoxemia alert floor */
+/* Consecutive abnormal VALID windows before vitals become an alert
+ * condition. One window = 5.12 s, so 3 = ~15 s of sustained
+ * abnormality; plus WARNING (5 s) + ALERT (5 s) the first SMS goes out
+ * ~25 s after onset. A single glitch window (motion, contact loss)
+ * can never page anyone; an invalid or normal window resets the
+ * streak - no data, no alarm. */
+#define VITALS_SUSTAIN_WINDOWS  3
+/* After an alert SMS is sent, suppress re-entry into WARNING for this
+ * long. Without it a SUSTAINED condition re-pages every escalation
+ * cycle (~10 s). While sustained, the condition re-escalates and
+ * re-pages once per cooldown interval (~5 min). Collision-triggered
+ * alerts intentionally bypass this (see monitor.cpp). */
+#define SMS_REPAGE_COOLDOWN_MS  300000U    /* 5 minutes */
 
 /* Speed thresholds (m/s). */
 #define SPEED_STOPPED           0.5f

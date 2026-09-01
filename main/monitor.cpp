@@ -95,11 +95,18 @@ void monitor_task(void * /*arg*/)
     state_t  state                 = NORMAL;
     int64_t  state_start_ms        = 0;
     int64_t  abort_cooldown_until  = 0;   /* suppresses re-trigger after abort */
+    int64_t  sms_cooldown_until    = 0;   /* suppresses re-page cycles after an SMS */
     /* True while the current ALERT was triggered by a collision. While
      * set, the "alert_condition cleared -> return to NORMAL" check is
      * bypassed so the ALERT runs its full ALERT_MS window. Cleared on
      * SMS send or button abort. */
     bool     collision_alert_active = false;
+    /* Vitals debounce: count consecutive abnormal VALID windows.
+     * oxim_seq lets the 100 ms poll consume each 5.12 s window exactly
+     * once - without it, one window would be counted ~51 times and
+     * the streak would trip within a single window. */
+    uint32_t last_oxim_seq = 0;
+    int      vitals_streak = 0;
 
     axion_state_t snap;
 
@@ -152,13 +159,55 @@ void monitor_task(void * /*arg*/)
              *   hyperthermia: temp > baseline + 1.0 °C
              * If no baseline is available yet (first boot, calibration
              * still running), temp_baseline defaults to 37.0 °C. */
+            bool temp_valid = snap.temp_baseline_valid;
             float temp_low  = snap.temp_baseline - TEMP_HYPO_DELTA;
             float temp_high = snap.temp_baseline + TEMP_HYPER_DELTA;
-            bool  temp_abnormal = (snap.temp_c < temp_low || snap.temp_c > temp_high);
+
+                        bool  temp_valid     = snap.temp_baseline_valid;
+            float temp_low  = snap.temp_baseline - TEMP_HYPO_DELTA;
+            float temp_high = snap.temp_baseline + TEMP_HYPER_DELTA;
+            bool  temp_abnormal  = temp_valid &&
+                                   (snap.temp_c < temp_low || snap.temp_c > temp_high);
+
+            /* ---- Heart rate / SpO2 (debounced per window) ----------------
+             * Only VALID windows carry signal - a finger-off window
+             * reports hr=0 / spo2=0 / valid=0 and must never look
+             * like bradycardia or hypoxemia. spo2==0 on a VALID window
+             * means the estimator's own <70 % floor rejected the curve
+             * output as noise - this layer agrees, so 0 is ignored
+             * here too. An invalid OR in-range window resets the
+             * streak: no data (or normal data) is not a continuation
+             * of an abnormal trend. */
+            if (snap.oxim_seq != last_oxim_seq) {
+                last_oxim_seq = snap.oxim_seq;
+                bool bad_window = false;
+                if (snap.spo2_valid) {
+                    if (snap.heart_rate < HR_LOW_THRESHOLD ||
+                        snap.heart_rate > HR_HIGH_THRESHOLD) {
+                        bad_window = true;
+                    }
+                    if (snap.spo2 >= 70.0f && snap.spo2 < SPO2_LOW_THRESHOLD) {
+                        bad_window = true;
+                    }
+                }
+                vitals_streak = bad_window ? (vitals_streak + 1) : 0;
+                if (bad_window) {
+                    ESP_LOGW(TAG, "vitals window out of range: hr=%d bpm "
+                                 "spo2=%.1f%% (streak %d/%d)",
+                             snap.heart_rate, (double)snap.spo2,
+                             vitals_streak, VITALS_SUSTAIN_WINDOWS);
+                }
+            }
+            bool vitals_abnormal = (vitals_streak >= VITALS_SUSTAIN_WINDOWS);
 
             bool  fallen        = (fabsf(roll_deg) >= FALL_ANGLE_THRESHOLD);
-            bool  alert_condition = fallen || temp_abnormal;
-            bool  in_cooldown     = (now_ms < abort_cooldown_until);
+            bool  alert_condition = fallen || temp_abnormal || vitals_abnormal;
+            /* Post-abort cooldown OR post-SMS re-page cooldown: stay in
+             * NORMAL even if the condition persists. Collision edges
+             * never reach this check, so a real impact is always
+             * honored regardless of either cooldown. */
+            bool  in_cooldown     = (now_ms < abort_cooldown_until) ||
+                                    (now_ms < sms_cooldown_until);
 
             /* If we're moving, the condition cleared, or we're in the
              * post-abort cooldown, return to / stay in NORMAL. */
@@ -193,6 +242,12 @@ void monitor_task(void * /*arg*/)
                     ESP_LOGW(TAG, "ALERT window expired; sending SMS "
                                  "(collision=%d)", collision_alert_active ? 1 : 0);
                     send_alert_sms(&snap, collision_alert_active);
+                                        /* Re-page limiter: while this condition sustains, the
+                     * next SMS can only go out after SMS_REPAGE_COOLDOWN_MS.
+                     * The WARNING (silent) + ALERT (buzzer) cycle re-runs
+                     * before each re-page, so the wearer gets ~10 s of
+                     * local buzzer warning it's about to re-page. */
+                    sms_cooldown_until = now_ms + SMS_REPAGE_COOLDOWN_MS;
                     state                  = NORMAL;
                     collision_alert_active = false;
                 }

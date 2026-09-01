@@ -108,18 +108,20 @@ void temperature_task(void * /*arg*/)
         ESP_LOGI(TAG, "first run: will calibrate for %u ms after first reading",
                  TEMP_CALIBRATION_MS);
     } else {
-        /* Load the previously-stored baseline from NVS so the monitor
-         * can compute hypo/hyper thresholds from it immediately. Falls
-         * back to TEMP_BASELINE_DEFAULT if NVS has nothing (shouldn't
-         * happen on a non-first-run boot, but guard anyway). */
+        /* Only push a baseline that actually exists. The default is a
+         * core-temp guess while the DS18B20 measures SKIN: bench ambient
+         * ~28 C against 35 C trips "hypothermia" on every boot and pages
+         * the emergency number. No baseline -> alerting disabled. */
         float stored = TEMP_BASELINE_DEFAULT;
         if (calibration_store_get_temp_baseline(&stored) == ESP_OK) {
             ESP_LOGI(TAG, "loaded temp baseline from NVS: %.2f C", stored);
+            axion_state_set_temp_baseline(stored);
         } else {
-            ESP_LOGW(TAG, "no temp baseline in NVS; using default %.2f C",
+            ESP_LOGW(TAG, "no temp baseline in NVS - temperature alerting "
+                          "DISABLED until calibration (default %.2f C "
+                          "not used for alerts)",
                      (double)TEMP_BASELINE_DEFAULT);
         }
-        axion_state_set_temp_baseline(stored);
     }
 
     TickType_t last_wake = xTaskGetTickCount();

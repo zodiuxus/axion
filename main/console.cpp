@@ -31,7 +31,7 @@ void console_task(void * /*arg*/)
         printf("\033[KHR/SpO2: %d bpm, %.1f%% (%s)\n",
                s.heart_rate, s.spo2,
                s.spo2_valid ? "valid" : "invalid");
-        printf("\033[K----------------------------------------\n");
+        printf("\033[K\n");
         fflush(stdout);
         vTaskDelay(pdMS_TO_TICKS(100));
     }

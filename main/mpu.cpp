@@ -1,6 +1,16 @@
 /**
  * mpu.cpp - MPU6050 setup + interrupt-driven DMP/collision task.
  *
+ * ---- Offset persistence ------------------------------------------------
+ * The accel+gyro offset registers are volatile (zeroed on every power
+ * cycle), but the PID calibration only ever needs to run ONCE per
+ * mounting orientation: mpu_setup() saves the six raw offset register
+ * values to NVS (key "mpu_offs", see calibration_store) on the first
+ * boot and simply rewrites them into the registers on every later boot.
+ * A factory reset invalidates them so the next boot re-calibrates - do
+ * that too if the board is re-mounted in a different orientation or
+ * the chip is swapped.
+ *
  * ---- Accel range: why we calibrate at ±2g and stay there --------------
  * The collision path reads the accel registers directly, so the g-scale
  * depends on AFS_SEL (±2g -> 16384 LSB/g, ±4g -> 8192 LSB/g). An earlier
@@ -66,6 +76,7 @@
 #include "config.h"
 #include "state.h"
 #include "collision.h"
+#include "calibration_store.h"
 
 static const char *TAG = "axion.mpu";
 
@@ -136,16 +147,73 @@ void mpu_setup(void)
     s_mpu.dmpInitialize();
 
     /* dmpInitialize() starts with a full device reset, so ACCEL_CONFIG
-     * is at its ±2g power-on default here. We calibrate EXPLICITLY at
-     * ±2g because the library's gravity-removal constant (16384) is
-     * hardcoded for that range - see the file header for how a ±4g
-     * calibration baked a 2 g error into the Z offset register. If you
-     * ever switch the operating range to ±4g, do it AFTER these two
-     * calls, never before. */
-    ESP_LOGI(TAG, "calibrating accel+gyro - keep the device still");
+     * is at its ±2g power-on default here AND the offset registers are
+     * back at zero - offsets are (re)applied only AFTER this point. We
+     * calibrate EXPLICITLY at ±2g because the library's gravity-removal
+     * constant (16384) is hardcoded for that range - see the file header
+     * for how a ±4g calibration baked a 2 g error into the Z offset
+     * register. If you ever switch the operating range to ±4g, do it
+     * AFTER the offsets below are applied, never before. */
     s_mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);
-    s_mpu.CalibrateAccel(6);
-    s_mpu.CalibrateGyro(6);
+
+    /* ---- Calibrate once, then persist to NVS --------------------------- */
+    /* CalibrateAccel/CalibrateGyro drive six offset registers
+     * (XA/YA/ZA_OFFS at 0x06/0x08/0x0A, XG/YG/ZG_OFFS_USR at
+     * 0x13/0x15/0x17) via a PID loop that needs the device to sit
+     * STILL for a second or two. Those registers are volatile - they
+     * reset to zero on every power cycle - so every boot used to redo
+     * the whole dance. Instead: run the PID loop ONCE, save the six raw
+     * register values as an NVS blob ("mpu_offs"), and on every later
+     * boot just rewrite them into the registers. Restoring the exact
+     * register values round-trips perfectly: the library's
+     * get/setXAccelOffset()/get/setXGyroOffset() use the same registers
+     * the PID routine writes, factory-trim LSB quirk included.
+     *
+     * Benefits: boots no longer require the device to be still (huge
+     * if it powers up while being worn), and setup is ~1-2 s faster.
+     *
+     * The accel offsets are orientation-dependent (gravity at rest is
+     * baked in), so re-mounting the board or a factory reset must
+     * invalidate them - see calibration_store_request_factory_reset().
+     * Swapping the MPU6050 chip itself also calls for a recalibration
+     * (offsets are per-chip factory-trim values). */
+    int16_t offs[6] = {0};
+    if (calibration_store_is_flag_set(CAL_FLAG_MPU_OFFSETS_VALID) &&
+        calibration_store_get_mpu_offsets(offs) == ESP_OK) {
+        s_mpu.setXAccelOffset(offs[0]);
+        s_mpu.setYAccelOffset(offs[1]);
+        s_mpu.setZAccelOffset(offs[2]);
+        s_mpu.setXGyroOffset(offs[3]);
+        s_mpu.setYGyroOffset(offs[4]);
+        s_mpu.setZGyroOffset(offs[5]);
+        ESP_LOGI(TAG, "MPU offsets restored from NVS (accel %d/%d/%d, "
+                      "gyro %d/%d/%d) - skipping calibration",
+                 offs[0], offs[1], offs[2],
+                 offs[3], offs[4], offs[5]);
+    } else {
+        ESP_LOGI(TAG, "no stored MPU offsets - calibrating accel+gyro, "
+                      "keep the device still");
+        s_mpu.CalibrateAccel(6);
+        s_mpu.CalibrateGyro(6);
+
+        offs[0] = s_mpu.getXAccelOffset();
+        offs[1] = s_mpu.getYAccelOffset();
+        offs[2] = s_mpu.getZAccelOffset();
+        offs[3] = s_mpu.getXGyroOffset();
+        offs[4] = s_mpu.getYGyroOffset();
+        offs[5] = s_mpu.getZGyroOffset();
+
+        if (calibration_store_set_mpu_offsets(offs) == ESP_OK) {
+            calibration_store_set_flag(CAL_FLAG_MPU_OFFSETS_VALID);
+            ESP_LOGI(TAG, "MPU offsets saved to NVS (accel %d/%d/%d, "
+                          "gyro %d/%d/%d) - future boots skip calibration",
+                     offs[0], offs[1], offs[2],
+                     offs[3], offs[4], offs[5]);
+        } else {
+            ESP_LOGW(TAG, "MPU offset NVS save failed - will re-calibrate "
+                          "on next boot");
+        }
+    }
 
     /* Sample rate divider: 1 kHz / (1 + 4) = 200 Hz data-ready rate.
      * dmpInitialize already picked the same value for its self-test,
@@ -290,9 +358,29 @@ void mpu_int_task(void * /*arg*/)
             continue;
         }
 
+        /* Bounded wait for a full DMP packet: at the 200 Hz sample rate
+         * a complete packet is at most ~10 ms away, i.e. a handful of
+         * these 2-byte FIFO-count transactions. The previous UNBOUNDED
+         * spin was a starvation hazard: if the MPU stops filling its
+         * FIFO while INTs keep firing (bus glitch from a loose wire,
+         * brownout, chip held in reset), this loop pins the
+         * highest-priority task in the system at 100% CPU and hammers
+         * the shared I2C bus with FIFO-count reads - starving the
+         * oximetry (prio 2) and monitor (prio 1) tasks exactly when
+         * they need to run. ~30 ms without a full packet means the DMP
+         * is wedged: reset the FIFO, log it, and wait for the next
+         * interrupt to try again. */
+        int fifo_spins = 0;
         while (fifo_count < s_packet_size) {
+            if (++fifo_spins > 150) {
+                s_mpu.resetFIFO();
+                ESP_LOGW(TAG, "DMP FIFO stalled (no full packet in ~30 ms) "
+                              "- reset, waiting for next INT");
+                break;
+            }
             fifo_count = s_mpu.getFIFOCount();
         }
+        if (fifo_count < s_packet_size) continue;
         s_mpu.getFIFOBytes(s_fifo_buffer, s_packet_size);
         s_mpu.dmpGetQuaternion(&q, s_fifo_buffer);
         s_mpu.dmpGetGravity(&gravity, &q);

@@ -101,6 +101,7 @@ extern "C" void axion_state_set_temp_baseline(float baseline)
 {
     if (s_state_mutex && xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         s_state.temp_baseline = baseline;
+        s_state.temp_baseline_valid = true;
         xSemaphoreGive(s_state_mutex);
     }
 }
@@ -111,6 +112,7 @@ extern "C" void axion_state_set_oximetry(int heart_rate, float spo2, bool valid)
         s_state.heart_rate = heart_rate;
         s_state.spo2       = spo2;
         s_state.spo2_valid = valid;
+        s_state.oxim_seq++;
         xSemaphoreGive(s_state_mutex);
     }
 }

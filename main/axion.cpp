@@ -90,7 +90,7 @@ extern "C" void app_main(void)
     xTaskCreate(status_led_task,       "status_led",2048, nullptr, 1, nullptr);
 
     /* Uncomment to enable the live console output (ANSI-aware terminal). */
-    xTaskCreate(console_task,       "console",   4096, nullptr, 0, nullptr);
+    // xTaskCreate(console_task,       "console",   4096, nullptr, 0, nullptr);
 
     ESP_LOGI(TAG, "All tasks spawned. Setup tasks will report when ready.");
 }

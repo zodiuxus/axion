@@ -33,7 +33,10 @@ void i2c_bus_setup(void);
 
 /** Initialize MPU6050 + DMP, configure the data-ready interrupt on
  *  PIN_MPU_INT, then set BIT_MPU_READY on success.
- *  Synchronous; deletes the calling task. */
+ *  On the first boot (no stored offsets), runs the PID accel+gyro
+ *  calibration and persists the six offset register values to NVS; on
+ *  every later boot it just restores them - no "keep still" needed,
+ *  and setup is ~1-2 s faster. Synchronous; deletes the calling task. */
 void mpu_setup(void);
 
 /** FreeRTOS task: wakes on PIN_MPU_INT rising edge, reads INT_STATUS,

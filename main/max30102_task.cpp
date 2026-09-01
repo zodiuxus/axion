@@ -16,15 +16,15 @@
  *
  * ---- Interrupt-driven FIFO drain (with poll fallback) ------------------
  * The primary wake source is the FIFO_A_FULL interrupt on
- * PIN_MAX30102_INT (fires when 17 samples are unread - every ~340 ms at
- * the effective 50 sps of 200 sps / 4x averaging), then the task
+ * PIN_MAX30102_INT (fires when 17 samples are unread - every ~680 ms at
+ * the effective 25 sps of 200 sps / 8x averaging), then the task
  * burst-reads all available samples in a single I2C transaction.
  *
  * The wait has a 250 ms timeout. A healthy interrupt path always beats
  * the timeout; if the edge is ever lost - INT wire off or misplaced,
  * missed edge, stuck line - the timeout path still drains the FIFO 4x
  * per second, which the 32-deep FIFO absorbs without overflow (it fills
- * in ~640 ms). So a dead INT line costs sampling latency, not data.
+ * in ~1.28 s at 25 sps). So a dead INT line costs sampling latency, not data.
  * When the timeout path fires with an empty FIFO, a throttled
  * diagnostic line distinguishes "sensor sampling but INT never arrives"
  * (check the INT wire) from "sensor not sampling at all" (check mode
@@ -78,6 +78,7 @@ static void IRAM_ATTR max30102_int_isr(void * /*arg*/)
 
 void max30102_task(void * /*arg*/)
 {
+    esp_log_level_set(TAG, ESP_LOG_DEBUG);
     /* Wait for the I2C bus (installed by i2c_bus_setup, signalled via
      * BIT_MPU_READY since the MPU setup task runs after i2c_bus_setup). */
     axion_state_wait_all(BIT_MPU_READY);
@@ -270,6 +271,32 @@ void max30102_task(void * /*arg*/)
             double r0   = 0.0;
             int    hr   = max30102_alg_heart_rate(ir_buf, &r0, nullptr);
             bool   valid = (corr >= 0.7) && (hr > 30 && hr < 220);
+
+            /* ---- Envelope sanity gates (motion-artifact rejection) ----
+             * corr >= 0.7 only proves RED and IR move TOGETHER - but
+             * motion artifact moves them together too (one mechanical
+             * disturbance modulates both channels), so correlation
+             * alone happily passes garbage. The one "115 bpm / 68 %"
+             * reading observed during bench rewiring was exactly this:
+             * hand/wire motion (~4 Hz periodicity, large correlated
+             * deflections) sailed through both gates and produced a
+             * confident-looking nonsense window. Two cheap checks on
+             * the raw envelope close that hole:
+             *   1. IR DC band: a coupled finger reads ~10k-150k counts
+             *      at the default LED current; < 8k = no finger or
+             *      ambient leakage, ~262143 = detector saturation.
+             *   2. Perfusion index: (max-min)/mean for a real pulse is
+             *      ~0.5-15 % peak-to-peak; motion artifact runs tens
+             *      of percent, a flat line ~0 %. Tunable constants -
+             *      loosen if good windows get rejected, tighten if
+             *      garbage slips through. */
+            double ir_dc   = (double)ir_mean;   /* pre-DC-removal mean */
+            double ir_pp   = (double)(ir_max - ir_min);
+            double perf_ix = (ir_dc > 0.0) ? (ir_pp / ir_dc) : 0.0;
+            bool optically_sane = (ir_dc >= 8000.0)  && (ir_dc < 260000.0) &&
+                                  (perf_ix >= 0.005) && (perf_ix <= 0.15);
+            valid = valid && optically_sane;
+
             float  spo2 = valid
                           ? (float)max30102_alg_spo2(ir_buf, red_buf,
                                                      ir_mean, red_mean)
@@ -291,15 +318,18 @@ void max30102_task(void * /*arg*/)
              * Flat & constant  -> no light / no coupling (LEDs off?)
              * Low, flat        -> LEDs firing, no finger on sensor
              * Jumps with finger, max-min spread grows -> healthy
-             * max == 262143    -> ADC saturated (too much light) */
+             * max == 262143    -> ADC saturated (too much light)
+             * Big spread + high corr but PI > 15% -> motion artifact,
+             *                             not a pulse (gate rejects) */
             if (!valid) invalid_windows++;
             if (first_window || (!valid && (invalid_windows % 10) == 1)) {
                 ESP_LOGI(TAG, "raw ir[%ld..%ld mean %ld] "
-                               "red[%ld..%ld mean %ld]",
+                               "red[%ld..%ld mean %ld] pi=%.3f",
                          (long)ir_min, (long)ir_max,
                          (long)(ir_sum / MAX30102_BUFFER_SIZE),
                          (long)red_min, (long)red_max,
-                         (long)(red_sum / MAX30102_BUFFER_SIZE));
+                         (long)(red_sum / MAX30102_BUFFER_SIZE),
+                         perf_ix);
             }
 
             axion_state_set_oximetry(hr, spo2, valid);
@@ -318,7 +348,8 @@ void max30102_task(void * /*arg*/)
                     calibrated = true;
                 }
             } else {
-                ESP_LOGD(TAG, "hr=%d bpm spo2=%.1f%% (corr=%.2f)", hr, spo2, corr);
+              ESP_LOGI(TAG, "win: hr=%d bpm spo2=%.1f%% corr=%.2f pi=%.3f valid=%d",
+                 hr, spo2, corr, perf_ix, valid ? 1 : 0);
             }
 
             /* Accumulate valid estimates during calibration. */
