@@ -96,13 +96,8 @@ extern "C" {
  * that drains the DMP FIFO. There's no separate collision_task anymore:
  * the MPU has only one INT pin, so the data-ready interrupt drives both.
  * A cooldown (COLLISION_COOLDOWN_MS) prevents a single physical impact
- * from firing multiple events.
- *
- * The MPU6050 accel range is set to ±4g in mpu_setup() so that readings
- * above 2G don't saturate (the default ±2g range would clip at exactly
- * the trigger threshold on a single axis). ±4g gives 8192 LSB/g and
- * 2G of headroom above the trigger. */
-#define COLLISION_THRESHOLD_G   4.0f        /* total-magnitude trigger (g) */
+ * from firing multiple events. */
+#define COLLISION_THRESHOLD_G   2.0f        /* total-magnitude trigger (g) */
 #define COLLISION_COOLDOWN_MS   3000U       /* min spacing between triggers */
 
 /* ---- Tuning constants ------------------------------------------------- */
