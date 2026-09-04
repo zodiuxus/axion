@@ -162,10 +162,6 @@ void monitor_task(void * /*arg*/)
             bool temp_valid = snap.temp_baseline_valid;
             float temp_low  = snap.temp_baseline - TEMP_HYPO_DELTA;
             float temp_high = snap.temp_baseline + TEMP_HYPER_DELTA;
-
-                        bool  temp_valid     = snap.temp_baseline_valid;
-            float temp_low  = snap.temp_baseline - TEMP_HYPO_DELTA;
-            float temp_high = snap.temp_baseline + TEMP_HYPER_DELTA;
             bool  temp_abnormal  = temp_valid &&
                                    (snap.temp_c < temp_low || snap.temp_c > temp_high);
 
