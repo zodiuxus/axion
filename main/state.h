@@ -50,11 +50,20 @@ typedef struct {
     /* Orientation (MPU6050 DMP). yaw, pitch, roll in radians. */
     float ypr[3];
 
-    /* Position / motion (GNSS). */
-    double lat;         /* degrees, +N */
-    double lon;         /* degrees, +E */
-    float  alt;         /* meters */
-    float  speed;       /* m/s, already converted from knots */
+    /* Position / motion (GNSS). lat/lon/alt/speed hold the LAST VALID fix -
+     * they are only overwritten when a new fix is actually acquired, never
+     * zeroed out just because the current poll came back with no lock (see
+     * gnss_fix_valid below). */
+    double lat;         /* degrees, +N - last known valid fix */
+    double lon;         /* degrees, +E - last known valid fix */
+    float  alt;         /* meters - last known valid fix */
+    float  speed;       /* m/s, already converted from knots - last known valid fix */
+    bool   gnss_fix_valid;  /* true if the MOST RECENT poll had an actual lock.
+                              * false means lat/lon/alt/speed above are stale -
+                              * last known position, not current. */
+    int64_t gnss_fix_ms;    /* esp_timer_get_time()/1000 at the last valid fix.
+                              * 0 if never had a fix this boot. Callers compute
+                              * staleness as (now_ms - gnss_fix_ms). */
 
     /* Body temperature (DS18B20). */
     float temp_c;
@@ -105,7 +114,14 @@ void axion_state_snapshot(axion_state_t *out);
 /* Update individual fields. Each call acquires the mutex briefly.
  * Use these from sensor tasks instead of poking fields directly. */
 void axion_state_set_ypr(const float ypr[3]);
+/* Record a VALID GNSS fix - updates position and marks gnss_fix_valid=true,
+ * gnss_fix_ms=now. Call this only when the modem actually reported a lock. */
 void axion_state_set_gnss(double lat, double lon, float alt, float speed);
+/* Record that the most recent GNSS poll came back with NO fix. Leaves
+ * lat/lon/alt/speed untouched (they keep the last known valid position) but
+ * clears gnss_fix_valid so consumers (e.g. the alert SMS) know the position
+ * they're about to report is stale. */
+void axion_state_note_gnss_no_fix(void);
 void axion_state_set_temp(float temp_c);
 void axion_state_set_temp_baseline(float baseline);
 void axion_state_set_oximetry(int heart_rate, float spo2, bool valid);

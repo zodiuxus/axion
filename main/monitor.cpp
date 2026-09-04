@@ -62,17 +62,42 @@ static const char *const k_alert_phones[AXION_ALERT_PHONE_MAX_COUNT] = {
 };
 
 /* Build the SMS body. The trigger label lets emergency services distinguish
- * a collision (e.g. vehicle impact) from a fall/vitals event. */
+ * a collision (e.g. vehicle impact) from a fall/vitals event. If the most
+ * recent GNSS poll had no lock, the position is the last known fix, not the
+ * current one - the message says so explicitly rather than implying a live
+ * position (or, worse, silently sending 0,0 as it used to before a fix was
+ * ever acquired). */
 static void send_alert_sms(const axion_state_t *s, bool collision_triggered)
 {
-    char msg[180];
-    snprintf(msg, sizeof(msg),
-             "AXION ALERT: %s. "
-             "lat=%.6f lon=%.6f alt=%.1f spd=%.1fm/s "
-             "temp=%.2fC hr=%d spo2=%.1f%%",
-             collision_triggered ? "collision detected" : "fall/vitals",
-             s->lat, s->lon, s->alt, s->speed,
-             s->temp_c, s->heart_rate, s->spo2);
+    char msg[200];
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    int64_t fix_age_s = (s->gnss_fix_ms > 0) ? (now_ms - s->gnss_fix_ms) / 1000 : -1;
+
+    if (s->gnss_fix_valid) {
+        snprintf(msg, sizeof(msg),
+                 "AXION ALERT: %s. "
+                 "lat=%.6f lon=%.6f alt=%.1f spd=%.1fm/s "
+                 "temp=%.2fC hr=%d spo2=%.1f%%",
+                 collision_triggered ? "collision detected" : "fall/vitals",
+                 s->lat, s->lon, s->alt, s->speed,
+                 s->temp_c, s->heart_rate, s->spo2);
+    } else if (fix_age_s >= 0) {
+        snprintf(msg, sizeof(msg),
+                 "AXION ALERT: %s. "
+                 "lat=%.6f lon=%.6f (LAST KNOWN, %llds old) alt=%.1f "
+                 "temp=%.2fC hr=%d spo2=%.1f%%",
+                 collision_triggered ? "collision detected" : "fall/vitals",
+                 s->lat, s->lon, (long long)fix_age_s, s->alt,
+                 s->temp_c, s->heart_rate, s->spo2);
+    } else {
+        /* Never had a fix this boot at all - don't send a bogus 0,0. */
+        snprintf(msg, sizeof(msg),
+                 "AXION ALERT: %s. "
+                 "NO GPS FIX YET "
+                 "temp=%.2fC hr=%d spo2=%.1f%%",
+                 collision_triggered ? "collision detected" : "fall/vitals",
+                 s->temp_c, s->heart_rate, s->spo2);
+    }
 
     for (int i = 0; i < AXION_ALERT_PHONE_MAX_COUNT; ++i) {
         if (k_alert_phones[i] == nullptr || k_alert_phones[i][0] == '\0') continue;

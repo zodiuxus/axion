@@ -7,6 +7,7 @@
 #include <cstring>
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "config.h"   /* for TEMP_BASELINE_DEFAULT */
 
 static const char *TAG = "axion.state";
@@ -81,10 +82,22 @@ extern "C" void axion_state_set_ypr(const float ypr[3])
 extern "C" void axion_state_set_gnss(double lat, double lon, float alt, float speed)
 {
     if (s_state_mutex && xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-        s_state.lat   = lat;
-        s_state.lon   = lon;
-        s_state.alt   = alt;
-        s_state.speed = speed;
+        s_state.lat            = lat;
+        s_state.lon            = lon;
+        s_state.alt            = alt;
+        s_state.speed          = speed;
+        s_state.gnss_fix_valid = true;
+        s_state.gnss_fix_ms    = esp_timer_get_time() / 1000;
+        xSemaphoreGive(s_state_mutex);
+    }
+}
+
+extern "C" void axion_state_note_gnss_no_fix(void)
+{
+    /* Deliberately does NOT touch lat/lon/alt/speed - callers that read the
+     * snapshot still get the last known valid position, just flagged stale. */
+    if (s_state_mutex && xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        s_state.gnss_fix_valid = false;
         xSemaphoreGive(s_state_mutex);
     }
 }

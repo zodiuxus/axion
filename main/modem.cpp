@@ -93,12 +93,20 @@ static void resolve_carrier_secrets(void)
  *            [<alt>],[<speed>],[<course>],[<PDOP>],[HDOP],[VDOP]
  * Required positions:
  *   4 = lat, 5 = N/S, 6 = lon, 7 = E/W, 10 = alt, 11 = speed (knots)
- */
-static void parse_cgnssinfo(char *data, double *lat, double *lon,
+ *
+ * No fix: the A7670E (like other SIMCOM GNSS modules) returns this same
+ * line with every field EMPTY, e.g. "+CGNSSINFO: ,,,,,,,,,,,,,,,". atof()
+ * on an empty string silently returns 0.0 - so without an explicit check
+ * here, a lost fix would report (0,0) instead of "no fix", and the caller
+ * would have no way to tell a real equator/prime-meridian position from
+ * "GPS not locked right now". We treat the <lat> field (idx 4) being
+ * empty as the no-fix signal, since a real fix always populates it.
+ *
+ * @return true if a fix was present and *lat/*lon/*alt/*speed_knots were
+ *         filled in; false if there is no fix (outputs left untouched). */
+static bool parse_cgnssinfo(char *data, double *lat, double *lon,
                             float *alt, float *speed_knots)
 {
-    *lat = 0.0; *lon = 0.0; *alt = 0.0f; *speed_knots = 0.0f;
-
     /* Skip the "+CGNSSINFO:" header if present so the comma parser starts
      * at the first field. */
     char *start = strstr(data, "+CGNSSINFO:");
@@ -111,12 +119,13 @@ static void parse_cgnssinfo(char *data, double *lat, double *lon,
     char *token   = strtok_r(start, ",\r\n", &saveptr);
     int   idx     = 0;
     bool  lat_neg = false, lon_neg = false;
+    bool  have_lat = false;
     double l_lat = 0.0, l_lon = 0.0;
     float  l_alt = 0.0f, l_spd = 0.0f;
 
     while (token != nullptr) {
         switch (idx) {
-            case 4:  l_lat   = atof(token); break;
+            case 4:  l_lat = atof(token); have_lat = (token[0] != '\0'); break;
             case 5:  lat_neg = (token[0] == 'S' || token[0] == 's'); break;
             case 6:  l_lon   = atof(token); break;
             case 7:  lon_neg = (token[0] == 'W' || token[0] == 'w'); break;
@@ -128,10 +137,13 @@ static void parse_cgnssinfo(char *data, double *lat, double *lon,
         idx++;
     }
 
+    if (!have_lat) return false;   /* no fix - caller keeps last known position */
+
     *lat         = lat_neg ? -l_lat : l_lat;
     *lon         = lon_neg ? -l_lon : l_lon;
     *alt         = l_alt;
     *speed_knots = l_spd;
+    return true;
 }
 
 /* ---- GNSS power-up sequence ----------------------------------------- */
@@ -323,13 +335,35 @@ void modem_gnss_task(void * /*arg*/)
     char    local_buf[UART_BUF_SIZE];
     double  lat = 0.0, lon = 0.0;
     float   alt = 0.0f, spd_knots = 0.0f;
+    int     consecutive_no_fix = 0;
 
     while (true) {
         if (at_command_send("AT+CGNSSINFO", 3000, "+CGNSSINFO:")) {
             at_command_last_response(local_buf, sizeof(local_buf));
-            parse_cgnssinfo(local_buf, &lat, &lon, &alt, &spd_knots);
-            float speed_ms = spd_knots * 0.5144447f;
-            axion_state_set_gnss(lat, lon, alt, speed_ms);
+            if (parse_cgnssinfo(local_buf, &lat, &lon, &alt, &spd_knots)) {
+                float speed_ms = spd_knots * 0.5144447f;
+                axion_state_set_gnss(lat, lon, alt, speed_ms);
+                if (consecutive_no_fix > 0) {
+                    ESP_LOGI(TAG, "GNSS fix reacquired after %d poll(s)",
+                             consecutive_no_fix);
+                }
+                consecutive_no_fix = 0;
+            } else {
+                /* No fix this poll - keep the last known position in state
+                 * (do NOT overwrite with zeros), just mark it stale. Log
+                 * throttled so a prolonged loss of lock (tunnel, indoors)
+                 * doesn't spam the log once per GNSS_POLL_MS. */
+                axion_state_note_gnss_no_fix();
+                consecutive_no_fix++;
+                if (consecutive_no_fix == 1 || (consecutive_no_fix % 12) == 0) {
+                    ESP_LOGW(TAG, "no GNSS fix (%d consecutive polls) - "
+                                  "reporting last known position if alerted",
+                             consecutive_no_fix);
+                }
+            }
+        } else {
+            /* AT command itself failed/timed out - also stale, same handling. */
+            axion_state_note_gnss_no_fix();
         }
         vTaskDelay(pdMS_TO_TICKS(GNSS_POLL_MS));
     }
