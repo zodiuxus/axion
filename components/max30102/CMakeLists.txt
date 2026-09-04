@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "max30102.c"
+        "max30102_algorithm.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        driver
+)

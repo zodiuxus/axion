@@ -11,6 +11,7 @@ extern "C" {
 #endif
 
 extern float temp_values[8];  // Declare the global variable
+#include "max30102_api.h"
 
 #ifdef __cplusplus
 }

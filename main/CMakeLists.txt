@@ -1,2 +1,26 @@
-idf_component_register(SRCS "axion.cpp" "init_mpu_sim_gps.cpp" "logic.cpp" "logic.h" "init_temp.c" "values.h" "monitor.cpp"
-                    INCLUDE_DIRS ".")
+idf_component_register(
+    SRCS
+        "axion.cpp"
+        "state.cpp"
+        "at_command.cpp"
+        "mpu.cpp"
+        "modem.cpp"
+        "temperature.cpp"
+        "monitor.cpp"
+        "console.cpp"
+        "max30102_task.cpp"
+        "calibration_store.cpp"
+        "status_led.cpp"
+        "alert_button.cpp"
+        "collision.cpp"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        driver
+        nvs_flash
+        max30102
+        I2Cdev
+        MPU6050
+        esp32-ds18b20
+        esp32-owb
+)

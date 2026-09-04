@@ -1,0 +1,31 @@
+# Axion default sdkconfig overrides.
+# Copy to sdkconfig.defaults in a fresh checkout; the build system will
+# merge these into sdkconfig on the first `idf.py build`.
+
+# Target chip
+CONFIG_IDF_TARGET="esp32s3"
+
+# FreeRTOS - use the vanilla (single-core tick) FreeRTOS for predictable
+# mutex semantics across the UART/state mutexes.
+CONFIG_FREERTOS_HZ=1000
+
+# Partition table - give us a bit of NVS for the calibration_store bitfield.
+CONFIG_PARTITION_TABLE_SINGLE_APP=y
+
+# NVS - used by calibration_store to persist the first-run / calibration flags.
+CONFIG_NVS_ENCRYPTION=n
+
+# Logging - default to INFO, can be bumped to DEBUG per-file in code.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_COLORS=y
+
+# UART - install enough driver slots.
+CONFIG_UART_ISR_IRAM_SAFE=y
+
+# I2C - legacy master driver (used by I2Cdev / MPU6050 and our max30102).
+CONFIG_I2C_ENABLE_DEBUG_LOG=n
+
+# Disable BT/WiFi by default to shrink the binary and avoid bringing
+# up RF calibration that the device doesn't use yet.
+CONFIG_BT_ENABLED=n
+CONFIG_ESP_WIFI_ENABLED=n
