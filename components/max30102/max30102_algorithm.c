@@ -132,25 +132,9 @@ double max30102_alg_spo2(const int32_t *ir, const int32_t *red,
     double red_rms = rms_value(red);
     if (ir_mean == 0 || red_mean == 0) return 0.0;
 
-    /* R = (red_AC/red_DC) / (ir_AC/ir_DC) - the standard ratio-of-ratios.
-     *
-     * Calibration curve: SpO2 = -45.06*R^2 + 30.354*R + 94.845. This is
-     * the quadratic that shipped (commented out!) in the reference repo
-     * this component was adapted from - its active line was the debug
-     * placeholder "SpO2 = 49.7*R", which is monotonically INCREASING in
-     * R, i.e. physiologically backwards: more red absorption relative to
-     * IR means MORE deoxyhemoglobin, so SpO2 must FALL as R rises.
-     *
-     * The symptom that uncovered it: ordinary finger values of R ~ 1.04
-     * to 1.07 mapped to the impossible "51.6–53.3 %" (49.7 * R), while
-     * genuinely good windows with R < 1.0 mapped below 50 % and were
-     * zeroed by the caller's plausibility gate - hence "SpO2 reads 51 to
-     * 53 % when it reads anything at all, 0 % otherwise".
-     *
-     * The quadratic maps the useful band sensibly:
-     *   R 0.5 -> ~98.8 %   R 0.7 -> ~94.0 %   R 0.9 -> ~85.7 %
-     * and falls off a cliff for R > 1.2, where the caller's
-     * physiological gate (< 70 % -> invalid) takes over. */
+    /* R = (red_AC/red_DC) / (ir_AC/ir_DC), the standard ratio-of-ratios.
+     * SpO2 = -45.06*R^2 + 30.354*R + 94.845 (monotonically decreasing:
+     *   R 0.5 -> ~98.8 %, R 0.7 -> ~94.0 %, R 0.9 -> ~85.7 %). */
     double R = (red_rms / (double)red_mean) / (ir_rms / (double)ir_mean);
     double spo2 = (-45.06 * R + 30.354) * R + 94.845;
     if (spo2 > 100.0) spo2 = 100.0;
@@ -166,13 +150,8 @@ static double autocorrelation(const int32_t *data, int lag)
     for (int i = 0; i < n; ++i) {
         sum += (double)data[i] * (double)data[i + lag];
     }
-    /* Divide by the FULL window (N), not the overlap count (n): this is
-     * the biased autocorrelation estimator, and the (N-lag)/N shrinkage
-     * is deliberate - it weights down long lags, where only a few
-     * overlapping samples make the estimate pure noise. With the lag
-     * search spanning 11..124, the unbiased form (divide by n) lets
-     * long-lag noise peaks rival the true period peak and the estimator
-     * locks onto nonsense (~13 bpm). Keep the N divisor. */
+    /* Biased estimator (divide by N): the (N-lag)/N shrinkage weights
+     * down long lags, where the overlap is mostly noise. */
     return sum / (double)MAX30102_ALG_BUFFER_SIZE;
 }
 
@@ -189,14 +168,8 @@ int max30102_alg_heart_rate(const int32_t *ir, double *r0, double *autocorr_out)
         if (autocorr_out) autocorr_out[lag] = ac[lag];
     }
 
-    /* Strongest LOCAL maximum inside the physiological band (lags 11..124
-     * correspond to ~487..29 bpm at 40 ms). The candidate peak must beat
-     * its immediate neighbours on both sides. A window with no pulse
-     * periodicity produces an autocorrelation curve that only decays
-     * from the left edge - it has no local maximum, so it now reports
-     * "no reading" (0). The previous plain global-max search picked that
-     * curve's leftmost point instead: lag 11 == 60/(11*0.040) == 136.4
-     * bpm, which is exactly why weak/noisy windows locked onto "136". */
+    /* Strongest LOCAL maximum in the physiological band (lags 11..124
+     * = ~12..136 bpm): no local max = no periodicity = report 0. */
     double best = 0.0;
     int    best_lag = 0;
     for (int lag = 11; lag < 125 && lag < MAX30102_ALG_BUFFER_SIZE - 1; ++lag) {

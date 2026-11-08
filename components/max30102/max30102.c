@@ -9,16 +9,12 @@
 
 max30102_config_t max30102_default_config(void)
 {
-    /* Build the config field-by-field. C does not allow chained
-     * designated initializers like .INT_EN_1.A_FULL_EN = 0, so we
-     * construct via the per-register byte views (data1..data13) which
-     * are part of the same union. The bit layout below mirrors the
-     * struct definitions in max30102.h.
+    /* Per-register byte views of the same union (chained designated
+     * initializers aren't valid C).
      *
-     * Defaults: SPO2 mode, 200 sps, 215 us LED pulse, 8-sample averaging
-     *           (effective 25 sps = 40 ms/sample - MUST match
-     *           MAX30102_ALG_SAMPLE_MS in max30102_algorithm.h), FIFO
-     *           rollover on, ~25.4 mA on both LEDs. */
+     * Effective rate: 200 sps / SMP_AVE(8) = 25 sps = 40 ms per sample
+     * - MUST match MAX30102_ALG_SAMPLE_MS. LED_PW=0b10 (215 us) = 17-bit
+     * ADC: full scale is 131071 counts, not 262143. */
     max30102_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
 
@@ -30,23 +26,15 @@ max30102_config_t max30102_default_config(void)
     cfg.data3 = 0x00;
     cfg.data4 = 0x00;
     cfg.data5 = 0x00;
-    /* REG_FIFO_CONFIG (0x08): SMP_AVE=011 (avg 8), ROLLOVER=1, A_FULL=0.
-     * 8x averaging gives an effective 25 sps (200/8), which matches the
-     * algorithm's 40 ms sample-period assumption, plus better per-sample
-     * SNR. (The old 4x = 50 sps ran the time base at 2x speed, so the
-     * HR estimator reported HALF the true bpm - a resting 60 bpm came
-     * out as exactly 30 and was zeroed by the hr > 30 gate.) */
+    /* REG_FIFO_CONFIG (0x08): SMP_AVE=011 (avg 8), ROLLOVER=1, A_FULL=0. */
     cfg.data6 = (0b011 << 5) | (1 << 4) | 0;
     /* REG_MODE_CONFIG (0x09): SHDN=0, RESET=0, MODE=011 (SPO2). */
     cfg.data7 = 0b011;
-    /* REG_SPO2_CONFIG (0x0A): ADC_RGE=01, SR=001 (200 Hz), LED_PW=10. */
+    /* REG_SPO2_CONFIG (0x0A): ADC_RGE=11 (16384 nA), SR=010 (200 Hz),
+       LED_PW=10 (215 us). */
     cfg.data8 = (0b11 << 5) | (0b010 << 2) | 0b10;
-    /* LED currents. 0x7F = 25.4 mA (0.2 mA per step). The previous 0x24
-     * (7.2 mA) contradicted the documented ~25.4 mA default and left
-     * the RED/IR pair underdriven: weak AC on many fingers, failing the
-     * correlation gate and producing 0 % SpO2. If the envelope
-     * diagnostic pins at ~262143 (saturated), drop to 0x3F (12.6 mA)
-     * or raise SPO2_ADC_RGE. */
+    /* LED currents: 0x7F = 25.4 mA (0.2 mA/step). If the envelope
+     * diagnostic pins near 131071 (17-bit FS), drop to 0x3F (12.6 mA). */
     cfg.data9  = 0x7F;
     cfg.data10 = 0x7F;
     cfg.data11 = 0x7F;
@@ -163,9 +151,8 @@ esp_err_t max30102_read_fifo_burst(i2c_master_dev_handle_t dev,
         return ESP_OK;
     }
 
-    /* Single I2C transaction: write REG_FIFO_DATA, then read n*6 bytes.
-     * The MAX30102 auto-increments the FIFO read pointer on each byte
-     * read, so this drains exactly n samples in one burst. */
+    /* One transaction: write REG_FIFO_DATA, read n*6 bytes (the FIFO
+     * read pointer auto-increments). */
     size_t byte_count = n * 6;
     uint8_t *buf = (uint8_t *)malloc(byte_count);
     if (buf == NULL) return ESP_ERR_NO_MEM;
@@ -194,9 +181,7 @@ esp_err_t max30102_read_fifo_burst(i2c_master_dev_handle_t dev,
 
 esp_err_t max30102_enable_fifo_a_full_int(i2c_master_dev_handle_t dev, bool enable)
 {
-    /* REG_INTR_ENABLE_1 bit 7 = A_FULL_EN. Read-modify-write to preserve
-     * the other interrupt enables (PPG_RDY, PROX, etc.) - though we
-     * currently only use A_FULL. */
+    /* REG_INTR_ENABLE_1 bit 7 = A_FULL_EN; RMW to preserve others. */
     uint8_t cur = 0;
     esp_err_t err = max30102_read_reg(dev, REG_INTR_ENABLE_1, &cur, 1);
     if (err != ESP_OK) return err;
@@ -220,14 +205,7 @@ esp_err_t max30102_read_temp(i2c_master_dev_handle_t dev, float *out_c)
 {
     if (out_c == NULL) return ESP_ERR_INVALID_ARG;
 
-    /* Trigger a temperature conversion, then wait for DIE_TEMP_RDY
-     * (INTR_STATUS_2 bit 1). The fixed 10 ms delay previously used
-     * here raced the conversion (~tens of ms) and read TINT/TFRAC
-     * before they were updated - bring-up logs showed a suspiciously
-     * exact "0.0 C". Polling the ready bit (clear-on-read, same bit
-     * layout as INTR_ENABLE_2) is correct without guessing the
-     * conversion time. Bounded at 20 x 2 ms so a wedged converter
-     * cannot hang the boot sequence. */
+    /* Trigger a conversion, poll DIE_TEMP_RDY (bounded ~40 ms). */
     esp_err_t err = max30102_write_reg(dev, REG_TEMP_CONFIG, 0x01);
     if (err != ESP_OK) return err;
     for (int i = 0; i < 20; ++i) {

@@ -1,5 +1,5 @@
 /**
- * console.cpp - Optional debug console. Replaces combine_sensors().
+ * console.cpp - Optional debug console (see console.h).
  */
 #include "console.h"
 

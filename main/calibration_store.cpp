@@ -40,8 +40,7 @@ esp_err_t calibration_store_init(void)
         }
         nvs_close(h);
     }
-    /* If the namespace or key doesn't exist yet (first-ever boot), treat
-     * it as a first run - the flag defaults to set. */
+    /* Missing key = first-ever boot: default to first-run. */
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         s_cached_flags = CAL_FLAG_FIRST_RUN;
         ESP_LOGI(TAG, "NVS key not found; defaulting to first-run=true (0x%08lx)",
@@ -104,9 +103,7 @@ esp_err_t calibration_store_request_factory_reset(void)
 {
     ESP_LOGW(TAG, "factory reset requested - first_run flag will be set");
     esp_err_t err = calibration_store_set_flag(CAL_FLAG_FIRST_RUN);
-    /* Also invalidate the stored MPU offsets: a factory reset should
-     * force a sensor re-calibration too, and the accel offsets depend
-     * on the mounting orientation (gravity baked in at rest). */
+    /* Invalidate MPU offsets too: they are orientation-dependent. */
     if (err == ESP_OK) {
         err = calibration_store_clear_flag(CAL_FLAG_MPU_OFFSETS_VALID);
     }
@@ -142,9 +139,7 @@ esp_err_t calibration_store_set_temp_baseline(float val)
     nvs_close(h);
     if (err != ESP_OK) return err;
 
-    /* Keep the documented contract: storing a baseline marks it valid.
-     * (Nothing reads this flag yet - callers probe with get + NOT_FOUND
-     * - but the header promises the bit, so set it.) */
+    /* Storing a baseline marks it valid (see header). */
     return calibration_store_set_flag(CAL_FLAG_TEMP_BASELINE_VALID);
 }
 
@@ -162,8 +157,7 @@ esp_err_t calibration_store_get_mpu_offsets(int16_t out[6])
     err = nvs_get_blob(h, NVS_KEY_MPU_OFFSETS, out, &sz);
     nvs_close(h);
 
-    /* NVS per-entry CRCs already catch corruption; this length check
-     * guards against a future format change writing a different size. */
+    /* Length guard against future format changes (CRC handles decay). */
     if (err == ESP_OK && sz != 6 * sizeof(int16_t)) {
         return ESP_ERR_NVS_INVALID_LENGTH;
     }

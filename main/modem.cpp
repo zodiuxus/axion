@@ -1,19 +1,13 @@
 /**
  * modem.cpp - A7670E bring-up + GNSS polling.
  *
- * Replaces init_mpu_sim_gps.cpp's at_init() + setup_gnss() + get_coords()
- * with a single bring-up task and a separate long-running GNSS poller.
+ * All UART access goes through at_command.* (mutex-protected). SIM PIN,
+ * carrier, and APN come from secrets.h as factory defaults, seeded into
+ * NVS on first boot (NVS wins afterwards).
  *
- * All UART access goes through at_command.* (mutex-protected).
- * SIM PIN, carrier (MCC+MNC), and APN all come from secrets.h
- * (gitignored) as factory defaults, but are also seeded into NVS on
- * first boot so they can be changed at runtime without reflashing.
- *
- * Roaming: the configured PLMN is a PREFERENCE, not a requirement.
- * modem_setup_task tries manual selection first; if it fails (e.g.
- * the user is abroad), it falls back to automatic (COPS=0) and waits
- * for CEREG stat=1 (home) or stat=5 (roaming). This lets the device
- * send SMS to 112 from any registered EU network.
+ * The configured PLMN is a preference: manual selection is tried first,
+ * then automatic, accepting home (CEREG stat=1) or roaming (stat=5) -
+ * so SMS to 112 works from any registered EU network.
  */
 #include "modem.h"
 
@@ -41,10 +35,7 @@ static const char *TAG = "axion.modem";
 #define NVS_KEY_APN_PASS  "apn_pass"
 
 /* ---- Carrier-secrets resolver ---------------------------------------- */
-/* On first boot, NVS has nothing - copy the secrets.h factory defaults
- * in and use them. On subsequent boots, NVS wins (it may have been
- * updated at runtime). The result is cached for the duration of this
- * boot so we don't hit NVS on every AT+COPS? retry. */
+/* NVS first, secrets.h fallback; cached for the duration of the boot. */
 static char s_carrier[8]   = "";   /* MCC+MNC, max 6 digits + NUL */
 static char s_apn_name[32] = "";
 static char s_apn_user[32] = "";
@@ -88,22 +79,10 @@ static void resolve_carrier_secrets(void)
 }
 
 /* ---- NMEA / Simcom +CGNSSINFO parser -------------------------------- */
-/* +CGNSSINFO: [<mode>],[<GPS-SVs>],[<GLONASS-SVs>],[BEIDOU-SVs],
- *            [<lat>],[<N/S>],[<lon>],[<E/W>],[<date>],[<UTC-time>],
- *            [<alt>],[<speed>],[<course>],[<PDOP>],[HDOP],[VDOP]
- * Required positions:
- *   4 = lat, 5 = N/S, 6 = lon, 7 = E/W, 10 = alt, 11 = speed (knots)
- *
- * No fix: the A7670E (like other SIMCOM GNSS modules) returns this same
- * line with every field EMPTY, e.g. "+CGNSSINFO: ,,,,,,,,,,,,,,,". atof()
- * on an empty string silently returns 0.0 - so without an explicit check
- * here, a lost fix would report (0,0) instead of "no fix", and the caller
- * would have no way to tell a real equator/prime-meridian position from
- * "GPS not locked right now". We treat the <lat> field (idx 4) being
- * empty as the no-fix signal, since a real fix always populates it.
- *
- * @return true if a fix was present and *lat/*lon/*alt/*speed_knots were
- *         filled in; false if there is no fix (outputs left untouched). */
+/* +CGNSSINFO: fields 4=lat 5=N/S 6=lon 7=E/W 10=alt 11=speed(knots).
+ * No fix = every field empty (atof() would read 0.0): an empty <lat>
+ * field is the no-fix signal.
+ * @return true on fix (outputs filled); false = no fix (untouched). */
 static bool parse_cgnssinfo(char *data, double *lat, double *lon,
                             float *alt, float *speed_knots)
 {
@@ -159,24 +138,16 @@ static void gnss_power_up(void)
         at_command_send("AT+CGNSSMOD=?", 9000, "OK");
     }
     at_command_send("AT+CGNSSURC=0", 10000, "OK");
-    /* It can take a while for a cold-start fix. Try once and let the
-     * polling task keep asking. */
+    /* Cold-start fix may take a while; the poller keeps asking. */
     at_command_send("AT+CGNSSINFO?", 9000, "OK");
     ESP_LOGI(TAG, "GNSS setup done; polling task will continue");
 }
 
 /* ---- Cellular registration (home + roaming) ------------------------- */
-/* Poll AT+CEREG? until the modem reports a registered state.
- *   stat=1  registered, home network
- *   stat=5  registered, roaming
- *   stat=0/2/3/4  not registered (not searching / searching / denied / unknown)
- *
- * Accepting stat=5 is what enables roaming - the home-PLMN-only check we
- * used before would reject any foreign network even though the SIM is
- * allowed to roam on it. SMS to 112 (EU emergency number) works on any
- * registered network regardless of roaming agreement, and personal
- * contacts work as long as the user's carrier has a roaming agreement
- * with the visited network. */
+/* Poll AT+CEREG? until registered:
+ *   stat=1 home, stat=5 roaming; 0/2/3/4 = not registered.
+ * Accepting stat=5 is what enables roaming (incl. SMS to 112 on any
+ * registered EU network). */
 static bool wait_for_registration(uint32_t timeout_ms)
 {
     const uint32_t step_ms = 2000;
@@ -211,10 +182,8 @@ static bool wait_for_registration(uint32_t timeout_ms)
 /* ---- Public tasks --------------------------------------------------- */
 void modem_setup_task(void * /*arg*/)
 {
-    /* Install the UART driver + create the response mutex. MUST run
-     * before any at_command_send()/at_modem_flush_rx() call: without it
-     * s_uart_mutex/s_resp_buf are NULL and every command fails instantly
-     * (the old log misleadingly showed "UART mutex timeout" for each). */
+    /* Install the UART driver before any at_command_* call. On failure
+     * continue anyway: sensors still work, monitor never unblocks. */
     esp_err_t uart_err = at_modem_init();
     if (uart_err != ESP_OK) {
         ESP_LOGE(TAG, "at_modem_init failed: %s - modem unusable this boot",
@@ -252,14 +221,8 @@ void modem_setup_task(void * /*arg*/)
         at_command_send("AT+CEREG=1", 1000, "OK");
     }
 
-    /* PLMN selection strategy:
-     *   1. If a home PLMN is configured, try manual selection first
-     *      (COPS=1,2). This makes registration fast when we're at
-     *      home and avoids wandering onto an unwanted roaming partner.
-     *   2. If manual selection fails OR we're roaming, fall back to
-     *      automatic (COPS=0). The modem will pick any allowed PLMN,
-     *      including a roaming partner of the home carrier.
-     *   3. If no PLMN is configured, just go automatic from the start. */
+    /* Manual PLMN if configured, else automatic; registration accepts
+     * home or roaming (see wait_for_registration). */
     if (s_carrier[0] != '\0') {
         char cops_cmd[24];
         snprintf(cops_cmd, sizeof(cops_cmd),
@@ -280,8 +243,7 @@ void modem_setup_task(void * /*arg*/)
         /* Continue anyway; the modem may recover on its own. */
     }
 
-    /* Attach to the PS (packet-switched) domain. SMS doesn't strictly
-     * need CGATT - it uses CS - but we set it for future data use. */
+    /* PS attach: not strictly needed for SMS, set for future data use. */
     at_command_send("AT+CGATT=1", 2000, "OK");
 
     /* APN configuration: only if a non-empty APN name was provided.
@@ -308,12 +270,9 @@ void modem_setup_task(void * /*arg*/)
     /* SMS text mode. */
     at_command_send("AT+CMGF=1", 9000, "OK");
 
-        axion_state_set_ready(BIT_AT_READY);
-    /* Arm collision escalation. The monitor task unblocks on BIT_AT_READY
-     * at the same moment, so from here on a collision alert can actually
-     * reach the SMS path. Impacts detected before this point (mounting
-     * bumps, bench handling) are logged by mpu_int_task but deliberately
-     * not escalated. */
+    axion_state_set_ready(BIT_AT_READY);
+    /* Arm collision escalation. The monitor's alert loop additionally
+     * waits for BIT_TEMP_CALIBRATED before it starts. */
     axion_state_set_armed(true);
     ESP_LOGI(TAG, "A7670E modem ready (SMS path available) - system armed");
 
@@ -349,10 +308,8 @@ void modem_gnss_task(void * /*arg*/)
                 }
                 consecutive_no_fix = 0;
             } else {
-                /* No fix this poll - keep the last known position in state
-                 * (do NOT overwrite with zeros), just mark it stale. Log
-                 * throttled so a prolonged loss of lock (tunnel, indoors)
-                 * doesn't spam the log once per GNSS_POLL_MS. */
+                /* No fix: keep last known position, mark stale,
+                 * throttle the log. */
                 axion_state_note_gnss_no_fix();
                 consecutive_no_fix++;
                 if (consecutive_no_fix == 1 || (consecutive_no_fix % 12) == 0) {

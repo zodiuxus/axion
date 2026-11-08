@@ -44,8 +44,7 @@ extern "C" void axion_state_set_ready(uint32_t bits)
     xEventGroupSetBits(g_sensors_ready, bits);
 }
 
-/* System arming gate - atomic, no mutex: written once by the modem task
- * and polled on every MPU interrupt wake (200 Hz). See state.h. */
+/* Atomic; see state.h. */
 static std::atomic<bool> s_armed{false};
 
 extern "C" void axion_state_set_armed(bool armed)
@@ -94,8 +93,7 @@ extern "C" void axion_state_set_gnss(double lat, double lon, float alt, float sp
 
 extern "C" void axion_state_note_gnss_no_fix(void)
 {
-    /* Deliberately does NOT touch lat/lon/alt/speed - callers that read the
-     * snapshot still get the last known valid position, just flagged stale. */
+    /* Marks stale without touching the position fields. */
     if (s_state_mutex && xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         s_state.gnss_fix_valid = false;
         xSemaphoreGive(s_state_mutex);

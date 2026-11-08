@@ -21,8 +21,8 @@ static QueueHandle_t s_button_queue = nullptr;
 static void IRAM_ATTR button_isr(void * /*arg*/)
 {
     int64_t now = esp_timer_get_time();
-    /* Non-blocking send; if the queue is full the event is silently
-     * dropped - that's fine, the debounce task will catch the next one. */
+    /* Non-blocking; a full queue just drops the event (debounce task
+     * catches the next one). */
     xQueueSendFromISR(s_button_queue, &now, nullptr);
 }
 
@@ -42,8 +42,7 @@ static void alert_button_task(void * /*arg*/)
         last_press_us = press_time;
 
         ESP_LOGI(TAG, "alert-abort button pressed");
-        /* Edge-triggered signal: the monitor task consumes this via
-         * xEventGroupWaitBits with xClearOnExit=pdTRUE. */
+        /* Edge-triggered; monitor consumes it clear-on-exit. */
         xEventGroupSetBits(g_sensors_ready, BIT_ALERT_ABORT);
     }
 }
@@ -56,8 +55,7 @@ void alert_button_init(void)
 
     s_button_queue = xQueueCreate(8, sizeof(int64_t));
 
-    /* The GPIO ISR service is installed once, centrally, in app_main
-     * (axion.cpp); we only attach our handler here. */
+    /* ISR service is installed centrally in app_main; just attach. */
     esp_err_t isr_err = gpio_isr_handler_add(PIN_ALERT_BUTTON, button_isr, nullptr);
     if (isr_err != ESP_OK) {
         ESP_LOGE(TAG, "gpio_isr_handler_add: %s", esp_err_to_name(isr_err));

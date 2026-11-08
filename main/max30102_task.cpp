@@ -1,46 +1,12 @@
 /**
- * max30102_task.cpp - Oximetry sampling + estimation task (interrupt-driven
- * with a poll fallback).
+ * max30102_task.cpp - Oximetry sampling + estimation task.
  *
- * On first run (CAL_FLAG_FIRST_RUN set in NVS), the task enters a
- * 2-minute calibration window after the first valid HR/SpO2 estimate.
- * During calibration, HR and SpO2 estimates are accumulated and the
- * averages are logged (will be stored as baselines when offset logic
- * is added). BIT_OXIM_CALIBRATED is set at the end of calibration.
+ * The FIFO_A_FULL interrupt drives burst reads (a 250 ms poll fallback
+ * covers a dead INT line - latency, not data loss). Each 128-sample
+ * window (5.12 s at the effective 25 sps) yields one HR/SpO2 estimate.
  *
- * On non-first-run boots, BIT_OXIM_CALIBRATED is set immediately after
- * the first valid estimate.
- *
- * The CAL_FLAG_FIRST_RUN flag is cleared by the status LED task once
- * ALL sensors have set their BIT_*_CALIBRATED bits.
- *
- * ---- Interrupt-driven FIFO drain (with poll fallback) ------------------
- * The primary wake source is the FIFO_A_FULL interrupt on
- * PIN_MAX30102_INT (fires when 17 samples are unread - every ~680 ms at
- * the effective 25 sps of 200 sps / 8x averaging), then the task
- * burst-reads all available samples in a single I2C transaction.
- *
- * The wait has a 250 ms timeout. A healthy interrupt path always beats
- * the timeout; if the edge is ever lost - INT wire off or misplaced,
- * missed edge, stuck line - the timeout path still drains the FIFO 4x
- * per second, which the 32-deep FIFO absorbs without overflow (it fills
- * in ~1.28 s at 25 sps). So a dead INT line costs sampling latency, not data.
- * When the timeout path fires with an empty FIFO, a throttled
- * diagnostic line distinguishes "sensor sampling but INT never arrives"
- * (check the INT wire) from "sensor not sampling at all" (check mode
- * config / LED currents).
- *
- * ---- Optical bring-up diagnostics --------------------------------------
- * "Is the sensor even working?" is answerable from the log alone:
- *   - init logs the DIE TEMPERATURE (proves silicon is converting,
- *     not just ACKing on I2C),
- *   - the first analysis window (and every 10th invalid window) logs
- *     the raw IR/RED envelope [min..max, mean]. Interpretation:
- *       flat & near constant          -> no light / no coupling
- *                                        (LEDs off, RD/IRD floating?)
- *       low values, flat              -> LEDs firing, no finger
- *       level jumps when finger lands -> healthy optical path
- *       max at 262143                 -> detector saturated
+ * First run: 2-minute calibration window after the first valid
+ * estimate. Later boots: BIT_OXIM_CALIBRATED set on the first window.
  */
 
 #include "max30102_task.h"
@@ -79,8 +45,7 @@ static void IRAM_ATTR max30102_int_isr(void * /*arg*/)
 void max30102_task(void * /*arg*/)
 {
     esp_log_level_set(TAG, ESP_LOG_DEBUG);
-    /* Wait for the I2C bus (installed by i2c_bus_setup, signalled via
-     * BIT_MPU_READY since the MPU setup task runs after i2c_bus_setup). */
+    /* BIT_MPU_READY doubles as the I2C-bus-ready signal. */
     axion_state_wait_all(BIT_MPU_READY);
 
     /* Handle for our 0x57 device on the shared bus (cached by I2Cdev). */
@@ -107,25 +72,9 @@ void max30102_task(void * /*arg*/)
     ESP_LOGI(TAG, "MAX30102 initialized (0x%02x on shared I2C bus)",
              MAX30102_I2C_ADDR);
 
-    /* Die temperature: proves the silicon is alive beyond a bare I2C
-     * ACK - the on-die sensor requires working internal conversion to
-     * produce this. Should read close to ambient (a degree or two above
-     * once the LEDs have been running). */
-    float die_temp = 0.0f;
-    if (max30102_read_temp(max_dev, &die_temp) == ESP_OK) {
-        ESP_LOGI(TAG, "die temp: %.1f C (expected near ambient)",
-                 (double)die_temp);
-    } else {
-        ESP_LOGW(TAG, "die temp read failed - chip ACKs but conversion "
-                      "path suspect");
-    }
-
-    /* Enable the FIFO_A_FULL interrupt and wire up the GPIO ISR. The
-     * MAX30102 INT pin is open-drain, active-low. We trigger on the
-     * falling edge (assertion). Reading the INT_STATUS register clears
-     * the interrupt and deasserts the pin. If this write fails (or the
-     * INT wire is missing entirely), the 250 ms wait timeout in the
-     * main loop below degrades to a poll and sampling continues. */
+    /* FIFO_A_FULL int: open-drain active-low pin, falling edge,
+     * read-to-clear. On failure the 250 ms poll fallback keeps
+     * sampling. */
     err = max30102_enable_fifo_a_full_int(max_dev, true);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "FIFO_A_FULL int enable failed: %s - "
@@ -165,9 +114,7 @@ void max30102_task(void * /*arg*/)
                  OXIM_CALIBRATION_MS);
     }
 
-    /* Circular analysis buffer. The burst read fills as many samples
-     * as the FIFO holds (up to 32); we accumulate into this buffer
-     * and run the algorithm every time it fills. */
+    /* Accumulate burst reads; run the algorithm when the buffer fills. */
     int32_t ir_buf[MAX30102_BUFFER_SIZE];
     int32_t red_buf[MAX30102_BUFFER_SIZE];
     int     buf_idx = 0;
@@ -176,21 +123,15 @@ void max30102_task(void * /*arg*/)
     int32_t red_burst[32];
     int32_t ir_burst[32];
 
-    /* Consecutive poll-timeout wakeups that produced nothing. 40 in a
-     * row (~10 s) triggers the throttled INT diagnostics below. */
+    /* ~10 s of silent polls triggers the INT diagnostics below. */
     int silent_polls = 0;
 
-    /* Raw-signal envelope stats for the current analysis window - see
-     * the bring-up diagnostics inside the window-fill branch. */
-    int32_t ir_min = 0, ir_max = 0, ir_sum = 0;
-    int32_t red_min = 0, red_max = 0, red_sum = 0;
-    int     invalid_windows = 0;
+    /* IR envelope, for the perf-index sanity gate. */
+    int32_t ir_min = 0, ir_max = 0;
 
     while (true) {
-        /* Block until the FIFO_A_FULL ISR notifies us. pdTRUE collapses
-         * back-to-back interrupts into a single wake. The 250 ms timeout
-         * is the poll fallback: a healthy INT beats it every time; a
-         * dead INT path still gets the FIFO drained 4x per second. */
+        /* Block for the ISR notification; the 250 ms timeout is the
+         * poll fallback. */
         BaseType_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250));
 
         /* Clear the interrupt (read-to-clear) so the INT pin deasserts. */
@@ -205,14 +146,9 @@ void max30102_task(void * /*arg*/)
             continue;
         }
         if (n == 0) {
-            /* Nothing to drain. If we were ALSO not notified, the
-             * interrupt path is suspect - keep sampling via the poll,
-             * but say so (throttled to once per ~10 s) with enough
-             * detail to pinpoint the fault:
-             *   - FIFO has data  -> sensor samples fine, INT never
-             *     arrives: check the INT wire to GPIO 8.
-             *   - FIFO empty     -> chip is not sampling at all:
-             *     check MODE_CONFIG / LED currents / red LED glow. */
+            /* Nothing to drain + not notified: throttled INT
+             * diagnostics (FIFO has data = INT wire; empty = not
+             * sampling). */
             if (!notified && ++silent_polls >= 40) {
                 uint8_t wr = 0, rd = 0, ovf = 0, mode = 0;
                 max30102_read_reg(max_dev, REG_FIFO_WR_PTR, &wr, 1);
@@ -238,24 +174,13 @@ void max30102_task(void * /*arg*/)
         }
         silent_polls = 0;
 
-        /* Copy the burst into the analysis buffer. When the analysis
-         * buffer fills, run the algorithm and reset. Per-sample raw
-         * min/max/sum are tracked for the diagnostics below. */
+        /* Copy the burst into the analysis buffer. */
         for (size_t i = 0; i < n; ++i) {
             int32_t ir_s  = ir_burst[i];
             int32_t red_s = red_burst[i];
-            if (buf_idx == 0) {
-                ir_min  = ir_max  = ir_s;
-                red_min = red_max = red_s;
-                ir_sum  = 0;
-                red_sum = 0;
-            }
-            if (ir_s  < ir_min)  ir_min  = ir_s;
-            if (ir_s  > ir_max)  ir_max  = ir_s;
-            if (red_s < red_min) red_min = red_s;
-            if (red_s > red_max) red_max = red_s;
-            ir_sum  += ir_s;
-            red_sum += red_s;
+            if (buf_idx == 0) ir_min = ir_max = ir_s;
+            if (ir_s < ir_min) ir_min = ir_s;
+            if (ir_s > ir_max) ir_max = ir_s;
             ir_buf[buf_idx]  = ir_s;
             red_buf[buf_idx] = red_s;
             buf_idx++;
@@ -273,23 +198,12 @@ void max30102_task(void * /*arg*/)
             bool   valid = (corr >= 0.7) && (hr > 30 && hr < 220);
 
             /* ---- Envelope sanity gates (motion-artifact rejection) ----
-             * corr >= 0.7 only proves RED and IR move TOGETHER - but
-             * motion artifact moves them together too (one mechanical
-             * disturbance modulates both channels), so correlation
-             * alone happily passes garbage. The one "115 bpm / 68 %"
-             * reading observed during bench rewiring was exactly this:
-             * hand/wire motion (~4 Hz periodicity, large correlated
-             * deflections) sailed through both gates and produced a
-             * confident-looking nonsense window. Two cheap checks on
-             * the raw envelope close that hole:
-             *   1. IR DC band: a coupled finger reads ~10k-150k counts
-             *      at the default LED current; < 8k = no finger or
-             *      ambient leakage, ~262143 = detector saturation.
-             *   2. Perfusion index: (max-min)/mean for a real pulse is
-             *      ~0.5-15 % peak-to-peak; motion artifact runs tens
-             *      of percent, a flat line ~0 %. Tunable constants -
-             *      loosen if good windows get rejected, tighten if
-             *      garbage slips through. */
+             * corr alone can't reject motion (it moves both channels
+             * together). Two extra checks:
+             *   1. IR DC band: coupled finger ~10k-150k counts; < 8k =
+             *      no finger; near full scale = saturation.
+             *   2. Perfusion index (p2p/mean): real pulse ~0.5-15 %,
+             *      motion artifact tens of percent, flat line ~0 %. */
             double ir_dc   = (double)ir_mean;   /* pre-DC-removal mean */
             double ir_pp   = (double)(ir_max - ir_min);
             double perf_ix = (ir_dc > 0.0) ? (ir_pp / ir_dc) : 0.0;
@@ -302,35 +216,10 @@ void max30102_task(void * /*arg*/)
                                                      ir_mean, red_mean)
                           : 0.0f;
 
-            /* Physiological plausibility gate. The calibration curve is
-             * monotonically decreasing, and this is an uncalibrated
-             * hobby-grade estimate: for a live finger anything under
-             * 70 % is estimate noise, not real hypoxia - report
-             * "invalid" (0) rather than an alarming number. (The old
-             * 50 % floor was tuned to the previous INVERTED 49.7*R
-             * curve, where it silently zeroed every good window with
-             * R < 1.0 - the exact cause of "SpO2 is 0 almost always,
-             * 51–53 % when it shows anything".) */
+            /* For a live finger anything under 70 % is estimate noise,
+             * not real hypoxia - report invalid instead. */
             if (spo2 > 100.0f) spo2 = 100.0f;
             if (spo2 < 70.0f)  spo2 = 0.0f;
-
-            /* ---- Bring-up diagnostics: raw optical envelope ----
-             * Flat & constant  -> no light / no coupling (LEDs off?)
-             * Low, flat        -> LEDs firing, no finger on sensor
-             * Jumps with finger, max-min spread grows -> healthy
-             * max == 262143    -> ADC saturated (too much light)
-             * Big spread + high corr but PI > 15% -> motion artifact,
-             *                             not a pulse (gate rejects) */
-            if (!valid) invalid_windows++;
-            if (first_window || (!valid && (invalid_windows % 10) == 1)) {
-                ESP_LOGI(TAG, "raw ir[%ld..%ld mean %ld] "
-                               "red[%ld..%ld mean %ld] pi=%.3f",
-                         (long)ir_min, (long)ir_max,
-                         (long)(ir_sum / MAX30102_BUFFER_SIZE),
-                         (long)red_min, (long)red_max,
-                         (long)(red_sum / MAX30102_BUFFER_SIZE),
-                         perf_ix);
-            }
 
             axion_state_set_oximetry(hr, spo2, valid);
 
@@ -348,8 +237,9 @@ void max30102_task(void * /*arg*/)
                     calibrated = true;
                 }
             } else {
-              ESP_LOGI(TAG, "win: hr=%d bpm spo2=%.1f%% corr=%.2f pi=%.3f valid=%d",
-                 hr, spo2, corr, perf_ix, valid ? 1 : 0);
+                ESP_LOGI(TAG, "win: hr=%d bpm spo2=%.1f%% corr=%.2f "
+                              "pi=%.3f valid=%d",
+                         hr, spo2, corr, perf_ix, valid ? 1 : 0);
             }
 
             /* Accumulate valid estimates during calibration. */

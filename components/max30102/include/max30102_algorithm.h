@@ -1,23 +1,9 @@
 #pragma once
 /**
- * max30102_algorithm.h - Heart-rate & SpO2 estimation from a buffer of
- * MAX30102 RED/IR samples.
+ * max30102_algorithm.h - HR & SpO2 estimation from RED/IR sample buffers.
  *
- * Adapted from Gabriel-Gardin/max30102_esp32_oximeter/algorithm.{c,h}.
- * The algorithm is autocorrelation-based: it finds the dominant
- * non-zero-lag peak of the IR autocorrelation and converts its lag to
- * bpm. SpO2 is estimated from the RMS ratio of the AC-coupled RED and
- * IR channels.
- *
- * Cleanup notes:
- *   - Hardcoded magic constant `sum_of_x = 325.12` removed; computed
- *     analytically from BUFFER_SIZE and SAMPLE_PERIOD.
- *   - Unused `time` accumulator removed from `sum_of_squared_elements`.
- *   - `calculate_heart_rate` no longer overwrites `resultado` on every
- *     iteration before a peak is found (was returning 333 bpm on no
- *     signal - replaced with a sentinel return of 0).
- *   - `remove_dc_part` now uses signed accumulation (the reference used
- *     uint64_t, which produced wrong results for negative DC offsets).
+ * Autocorrelation-based HR (dominant non-zero-lag peak -> bpm); SpO2
+ * from the RMS ratio of the AC-coupled channels.
  */
 #ifndef MAX30102_ALGORITHM_H
 #define MAX30102_ALGORITHM_H
@@ -57,14 +43,10 @@ double max30102_alg_correlation(const int32_t *red, const int32_t *ir);
 
 /**
  * Estimate heart rate from the IR buffer.
- *
- * @param ir                  IR sample buffer (must be at least
- *                             MAX30102_ALG_BUFFER_SIZE elements).
- * @param r0                  Out: autocorrelation at lag 0 (for SNR check).
- * @param autocorr_out        Out: optional buffer to receive the
- *                             normalized autocorrelation curve (length
- *                             MAX30102_ALG_BUFFER_SIZE). May be NULL.
- * @return Heart rate in bpm, or 0 if no reliable peak was found.
+ * @param ir            Buffer of >= MAX30102_ALG_BUFFER_SIZE samples.
+ * @param r0            Out: autocorrelation at lag 0 (SNR check).
+ * @param autocorr_out  Out: optional normalized autocorrelation curve.
+ * @return bpm, or 0 if no reliable peak was found.
  */
 int max30102_alg_heart_rate(const int32_t *ir, double *r0, double *autocorr_out);
 

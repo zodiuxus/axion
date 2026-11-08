@@ -1,10 +1,5 @@
 /**
- * status_led.cpp - see status_led.h for design notes.
- *
- * The task reads `CAL_FLAG_FIRST_RUN` from NVS to decide whether to
- * enter the CALIBRATING blink phase. It waits for BIT_TEMP_CALIBRATED
- * and BIT_OXIM_CALIBRATED to be set before transitioning to the solid
- * "complete" glow.
+ * status_led.cpp - see status_led.h.
  */
 #include "status_led.h"
 
@@ -24,8 +19,7 @@ static const char *TAG = "axion.led";
 static inline void led_on(void)  { gpio_set_level(PIN_GREEN_LED, 1); }
 static inline void led_off(void) { gpio_set_level(PIN_GREEN_LED, 0); }
 
-/* Blink for up to `duration_ms`, checking a condition each cycle.
- * Returns true if the condition became true, false on timeout. */
+/* Blink until cond() is true or deadline_ms; returns which happened. */
 static bool blink_until_condition_or_timeout(bool (*cond)(void),
                                              int on_ms, int off_ms,
                                              int64_t deadline_ms)
@@ -90,10 +84,8 @@ void status_led_task(void * /*arg*/)
     }
 
     /* ---- COMPLETE: solid 2 s glow, then off ---- */
-    /* Clear the first-run flag now that ALL sensors have set their
-     * CALIBRATED bits (or the timeout expired). Doing this here - rather
-     * than in individual sensor tasks - ensures that a reboot during
-     * any sensor's calibration window will re-run ALL calibrations. */
+    /* Clear FIRST_RUN only here so a reboot during any calibration
+     * re-runs all of them. */
     if (first_run) {
         calibration_store_clear_flag(CAL_FLAG_FIRST_RUN);
         ESP_LOGI(TAG, "first-run complete; flag cleared in NVS");

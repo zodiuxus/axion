@@ -1,14 +1,5 @@
 /**
  * at_command.cpp - see at_command.h.
- *
- * Replaces the bare `send_at_command` in the old logic.cpp with a proper
- * mutex-protected driver. Fixes:
- *   - The shared response buffer is now file-scoped (not `static` in a
- *     header, which gave every TU its own copy).
- *   - The buffer is cleared at the start of every call, so stale bytes
- *     from a previous command cannot cause false `strstr()` matches.
- *   - `uart_flush` is called BEFORE writing the command (not after),
- *     so legitimate response bytes that arrive in the gap are not lost.
  */
 #include "at_command.h"
 
@@ -87,9 +78,8 @@ void at_modem_flush_rx(void)
 size_t at_command_last_response(char *out, size_t out_size)
 {
     if (out == nullptr || out_size == 0) return 0;
-    /* Read-only access to the buffer; no need for the mutex because
-     * at_command_send() is the only writer and callers typically call
-     * this immediately after their own at_command_send() returns. */
+    /* Read-only access; the only writer is at_command_send(), which
+     * callers run immediately before this. */
     size_t copy_len = strlen(s_resp_buf ? s_resp_buf : "");
     if (copy_len >= out_size) copy_len = out_size - 1;
     memcpy(out, s_resp_buf ? s_resp_buf : "", copy_len);
@@ -105,8 +95,7 @@ bool at_command_send(const char *cmd, int max_timeout_ms, const char *expected_r
         return false;
     }
 
-    /* Drain anything left from a previous transaction, then clear our
-     * local buffer so stale substrings cannot produce false positives. */
+    /* Flush RX + clear the buffer so stale bytes can't false-match. */
     uart_flush_input(UART_MODEM_PORT);
     if (s_resp_buf && s_resp_buf_sz > 0) s_resp_buf[0] = '\0';
 

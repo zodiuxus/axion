@@ -1,23 +1,9 @@
 #pragma once
 /**
- * max30102.h - Maxim MAX30102 pulse oximeter driver (clean component).
+ * max30102.h - Maxim MAX30102 pulse oximeter driver.
  *
- * Adapted from Gabriel-Gardin/max30102_esp32_oximeter with the following
- * changes:
- *   - Removed WiFi/MQTT coupling (this is a driver, not an app).
- *   - An i2c_master_dev_handle_t is passed in by the caller (no global).
- *   - `max_config` is no longer a global defined in a header (that was
- *     an ODR violation waiting to happen); instead a default is provided
- *     by max30102_default_config() and the caller may override fields.
- *   - Fixed `read_max30102_fifo` - the reference used `+=` and silently
- *     accumulated garbage instead of overwriting.
- *   - Migrated to the modern I2C master driver (driver/i2c_master.h):
- *     i2c_master_transmit / i2c_master_transmit_receive.
- *
- * The driver does NOT install the I2C bus - the caller is responsible
- * for that. In Axion, I2Cdev::installBus() (called from the MPU setup
- * task) creates the shared bus first, then max30102_init() attaches to
- * it via I2Cdev::deviceHandle(MAX30102_I2C_ADDR).
+ * The caller installs the I2C bus and passes an i2c_master_dev_handle_t
+ * (in Axion: I2Cdev::installBus() + I2Cdev::deviceHandle()).
  */
 #ifndef MAX30102_H
 #define MAX30102_H
@@ -140,30 +126,13 @@ max30102_config_t max30102_default_config(void);
  */
 esp_err_t max30102_init(i2c_master_dev_handle_t dev, const max30102_config_t *cfg);
 
-/**
- * Read one FIFO sample (6 bytes: 3 for RED, 3 for IR).
- * Returns ESP_OK on success. *red and *ir are written as 18-bit values
- * (the sensor's native resolution at SPO2_ADC_RGE=01).
- *
- * Prefer max30102_read_fifo_burst() when servicing the FIFO_A_FULL
- * interrupt - it reads all queued samples in a single I2C transaction
- * instead of N separate ones.
- */
+/** Read one FIFO sample (6 bytes: 3 RED + 3 IR, 18-bit values).
+ *  Prefer max30102_read_fifo_burst() for FIFO_A_FULL servicing. */
 esp_err_t max30102_read_fifo(i2c_master_dev_handle_t dev, int32_t *red, int32_t *ir);
 
-/**
- * Burst-read up to `max_samples` FIFO samples in one I2C transaction.
- * `*out_count` is set to the number of samples actually read (which is
- * the smaller of max_samples and the FIFO occupancy at read time).
- *
- * Caller provides `red_out` / `ir_out` arrays of length `max_samples`.
- * Each sample is an 18-bit unsigned value (the sensor's native width
- * at SPO2_ADC_RGE=01).
- *
- * This is the preferred way to drain the FIFO from the FIFO_A_FULL
- * interrupt handler - it cuts I2C bus traffic by ~6× compared to
- * reading one sample at a time.
- */
+/** Burst-read up to `max_samples` FIFO samples in one I2C transaction
+ *  (preferred FIFO_A_FULL drain: ~6x less bus traffic than 1-at-a-time).
+ *  `*out_count` = number of samples actually read. */
 esp_err_t max30102_read_fifo_burst(i2c_master_dev_handle_t dev,
                                    int32_t *red_out, int32_t *ir_out,
                                    size_t max_samples, size_t *out_count);

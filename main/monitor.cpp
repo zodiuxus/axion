@@ -1,37 +1,19 @@
 /**
  * monitor.cpp - Fall, vitals, and collision monitor.
  *
- * State machine: NORMAL → WARNING (5 s) → ALERT (5 s, buzzer pulsing) → SMS.
+ * State machine: NORMAL -> WARNING (5 s) -> ALERT (5 s, buzzer) -> SMS.
+ * Starts only after MPU + modem are up and the temp reading has
+ * reached the arm minimum (probe on skin; fail-open only for an
+ * absent or silent probe).
  *
- * Two edge-triggered signals from the shared event group drive the
- * out-of-band transitions:
- *
- *   BIT_ALERT_ABORT       (button press)  - at any point in WARNING or
- *                                            ALERT, immediately reset to
- *                                            NORMAL and arm a cooldown so
- *                                            the state machine doesn't
- *                                            re-enter WARNING while the
- *                                            user is still recovering.
- *
- *   BIT_COLLISION_DETECTED (4G+ impact)   - bypass the WARNING phase
- *                                            entirely and jump straight
- *                                            to ALERT. This is the
- *                                            highest-priority alert
- *                                            source: a real collision
- *                                            starts the contacting
- *                                            sequence within tens of ms
- *                                            instead of waiting 5 s.
- *
- * A collision-triggered ALERT is "sticky": the normal "if alert_condition
- * cleared, return to NORMAL" check is skipped while the ALERT was caused
- * by a collision. A real impact shouldn't be cancelled just because the
- * device came to rest. The button is still the escape hatch - a press at
- * any point during the ALERT window cancels the SMS.
- *
- * After a button abort, a cooldown (ABORT_COOLDOWN_MS) prevents the state
- * machine from immediately re-entering WARNING if the alert condition is
- * still present. The cooldown does NOT apply to collision-triggered
- * alerts - a real 2G+ impact is always honored.
+ *   BIT_ALERT_ABORT (button) - cancel to NORMAL at any point; arms an
+ *       abort cooldown so WARNING isn't re-entered while the condition
+ *       persists.
+ *   BIT_COLLISION_DETECTED - bypass WARNING, jump straight to ALERT.
+ *       A collision ALERT is sticky: it runs its full window (a real
+ *       impact shouldn't be cancelled by coming to rest); the button
+ *       is still the escape hatch. Collision alerts ignore both
+ *       cooldowns.
  */
 #include "monitor.h"
 
@@ -53,20 +35,14 @@
 
 static const char *TAG = "axion.monitor";
 
-/* Recipients table - populated from secrets.h. Empty slots are skipped.
- * Order matters: ALERT_PHONE_1 (112) is contacted first, ALERT_PHONE_2
- * (personal backup) second. */
+/* Recipients from secrets.h, in priority order; empty slots skipped. */
 static const char *const k_alert_phones[AXION_ALERT_PHONE_MAX_COUNT] = {
     ALERT_PHONE_1,
     ALERT_PHONE_2,
 };
 
-/* Build the SMS body. The trigger label lets emergency services distinguish
- * a collision (e.g. vehicle impact) from a fall/vitals event. If the most
- * recent GNSS poll had no lock, the position is the last known fix, not the
- * current one - the message says so explicitly rather than implying a live
- * position (or, worse, silently sending 0,0 as it used to before a fix was
- * ever acquired). */
+/* Build the SMS body: trigger type + position (marked LAST KNOWN if the
+ * fix is stale, NO GPS FIX if none this boot) + vitals. */
 static void send_alert_sms(const axion_state_t *s, bool collision_triggered)
 {
     char msg[200];
@@ -109,8 +85,10 @@ static void send_alert_sms(const axion_state_t *s, bool collision_triggered)
 
 void monitor_task(void * /*arg*/)
 {
-    /* Need MPU (for fall + collision detection) + modem (for SMS). */
-    axion_state_wait_all(BIT_MPU_READY | BIT_AT_READY);
+    /* MPU (fall + collision), modem (SMS), and the probe reading at
+     * the arm minimum (BIT_TEMP_MIN_REACHED). Temp alerts additionally
+     * require a valid baseline and an at-minimum reading. */
+    axion_state_wait_all(BIT_MPU_READY | BIT_AT_READY | BIT_TEMP_MIN_REACHED);
 
     gpio_reset_pin(PIN_BUZZER);
     gpio_set_direction(PIN_BUZZER, GPIO_MODE_OUTPUT);
@@ -121,15 +99,10 @@ void monitor_task(void * /*arg*/)
     int64_t  state_start_ms        = 0;
     int64_t  abort_cooldown_until  = 0;   /* suppresses re-trigger after abort */
     int64_t  sms_cooldown_until    = 0;   /* suppresses re-page cycles after an SMS */
-    /* True while the current ALERT was triggered by a collision. While
-     * set, the "alert_condition cleared -> return to NORMAL" check is
-     * bypassed so the ALERT runs its full ALERT_MS window. Cleared on
-     * SMS send or button abort. */
+    /* True while the current ALERT is collision-triggered (sticky). */
     bool     collision_alert_active = false;
-    /* Vitals debounce: count consecutive abnormal VALID windows.
-     * oxim_seq lets the 100 ms poll consume each 5.12 s window exactly
-     * once - without it, one window would be counted ~51 times and
-     * the streak would trip within a single window. */
+    /* Vitals debounce: count consecutive abnormal VALID windows;
+     * oxim_seq makes the 100 ms poll count each window exactly once. */
     uint32_t last_oxim_seq = 0;
     int      vitals_streak = 0;
 
@@ -160,8 +133,7 @@ void monitor_task(void * /*arg*/)
             continue;
         }
 
-        /* Always pull a fresh snapshot so the SMS body carries current
-         * vitals + location, regardless of which path triggered the alert. */
+        /* Fresh snapshot for the SMS body regardless of trigger path. */
         axion_state_snapshot(&snap);
 
         /* ---- Collision: bypass WARNING, jump straight to ALERT. ------- */
@@ -171,34 +143,25 @@ void monitor_task(void * /*arg*/)
             collision_alert_active = true;
             ESP_LOGW(TAG, "collision detected - escalating directly to ALERT "
                          "(WARNING skipped)");
-            /* Fall through to the switch below; the ALERT case will pulse
-             * the buzzer and send the SMS when ALERT_MS expires. */
+            /* Fall through: the ALERT case handles buzzer + SMS. */
         } else if (!collision_alert_active) {
             /* ---- Normal fall/vitals check (skipped during a collision ALERT). -- */
             float roll_deg      = snap.ypr[2] * 180.0f / (float)M_PI;
             bool  stopped       = (snap.speed < SPEED_STOPPED);
 
-            /* Temperature thresholds are per-user: the calibrated baseline
-             * (stored in NVS, loaded into shared state) ± fixed deltas.
-             *   hypothermia:  temp < baseline - 0.7 °C
-             *   hyperthermia: temp > baseline + 1.0 °C
-             * If no baseline is available yet (first boot, calibration
-             * still running), temp_baseline defaults to 37.0 °C. */
-            bool temp_valid = snap.temp_baseline_valid;
+            /* Thresholds are per-user: stored baseline ± fixed deltas.
+             * A below-minimum reading means the probe is off the body,
+             * not real hypothermia - suppress the temp channel. */
+            bool temp_valid = snap.temp_baseline_valid &&
+                              (snap.temp_c >= TEMP_BASELINE_DEFAULT);
             float temp_low  = snap.temp_baseline - TEMP_HYPO_DELTA;
             float temp_high = snap.temp_baseline + TEMP_HYPER_DELTA;
             bool  temp_abnormal  = temp_valid &&
                                    (snap.temp_c < temp_low || snap.temp_c > temp_high);
 
             /* ---- Heart rate / SpO2 (debounced per window) ----------------
-             * Only VALID windows carry signal - a finger-off window
-             * reports hr=0 / spo2=0 / valid=0 and must never look
-             * like bradycardia or hypoxemia. spo2==0 on a VALID window
-             * means the estimator's own <70 % floor rejected the curve
-             * output as noise - this layer agrees, so 0 is ignored
-             * here too. An invalid OR in-range window resets the
-             * streak: no data (or normal data) is not a continuation
-             * of an abnormal trend. */
+             * Only VALID windows count: invalid or normal data resets
+             * the streak; spo2==0 on a valid window = estimator noise. */
             if (snap.oxim_seq != last_oxim_seq) {
                 last_oxim_seq = snap.oxim_seq;
                 bool bad_window = false;
@@ -223,10 +186,8 @@ void monitor_task(void * /*arg*/)
 
             bool  fallen        = (fabsf(roll_deg) >= FALL_ANGLE_THRESHOLD);
             bool  alert_condition = fallen || temp_abnormal || vitals_abnormal;
-            /* Post-abort cooldown OR post-SMS re-page cooldown: stay in
-             * NORMAL even if the condition persists. Collision edges
-             * never reach this check, so a real impact is always
-             * honored regardless of either cooldown. */
+            /* Cooldowns: stay in NORMAL while one is active; collision
+             * edges bypass them. */
             bool  in_cooldown     = (now_ms < abort_cooldown_until) ||
                                     (now_ms < sms_cooldown_until);
 
@@ -263,11 +224,8 @@ void monitor_task(void * /*arg*/)
                     ESP_LOGW(TAG, "ALERT window expired; sending SMS "
                                  "(collision=%d)", collision_alert_active ? 1 : 0);
                     send_alert_sms(&snap, collision_alert_active);
-                                        /* Re-page limiter: while this condition sustains, the
-                     * next SMS can only go out after SMS_REPAGE_COOLDOWN_MS.
-                     * The WARNING (silent) + ALERT (buzzer) cycle re-runs
-                     * before each re-page, so the wearer gets ~10 s of
-                     * local buzzer warning it's about to re-page. */
+                    /* Re-page limiter: ~10 s of WARNING+ALERT buzzer
+                     * before each re-page. */
                     sms_cooldown_until = now_ms + SMS_REPAGE_COOLDOWN_MS;
                     state                  = NORMAL;
                     collision_alert_active = false;

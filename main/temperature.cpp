@@ -1,19 +1,20 @@
 /**
  * temperature.cpp - DS18B20 1-Wire body-temperature task.
  *
- * On first run (CAL_FLAG_FIRST_RUN set in NVS), the task enters a
- * 2-minute calibration window after the first successful reading.
- * During calibration, readings are accumulated and the average is
- * logged (and will be stored as a baseline offset in NVS when the
- * offset logic is added - "we'll add those options in detail later on").
- * BIT_TEMP_CALIBRATED is set at the end of calibration.
+ * The current reading is the only signal: >= TEMP_BASELINE_DEFAULT
+ * means the probe is on skin - arm the monitor (BIT_TEMP_MIN_REACHED),
+ * run the first-run calibration window, publish the stored baseline on
+ * later boots. Below it the probe is off the body and the monitor's own
+ * per-poll minimum check keeps the temp channel inert. No settle /
+ * flatness gating - the arm minimum makes it redundant.
  *
- * On non-first-run boots, BIT_TEMP_CALIBRATED is set immediately after
- * the first successful reading - no calibration window is needed.
+ * First-run calibration averages TEMP_CALIBRATION_MS' worth of ON-BODY
+ * samples only, so off-body time merely pauses it. Only hardware faults
+ * fail open: an absent or silent probe releases the monitor gate after
+ * TEMP_FIRST_READ_TIMEOUT_MS so fall/collision alerting survive.
  *
- * The CAL_FLAG_FIRST_RUN flag is cleared by the status LED task once
- * ALL sensors have set their BIT_*_CALIBRATED bits, so a reboot during
- * temperature calibration will re-run it.
+ * CAL_FLAG_FIRST_RUN is cleared by the status LED once ALL sensors set
+ * their BIT_*_CALIBRATED bits (a mid-calibration reboot re-runs it).
  */
 #include "temperature.h"
 
@@ -38,6 +39,11 @@ static const char *TAG = "axion.temp";
 #define MAX_DEVICES          8
 #define SAMPLE_PERIOD_MS     1000U
 #define DS18B20_RESOLUTION   DS18B20_RESOLUTION_12_BIT
+
+/* First-run calibration target: TEMP_CALIBRATION_MS' worth of on-body
+ * samples at the sampling rate. Keep in sync with SAMPLE_PERIOD_MS. */
+#define TEMP_CAL_SAMPLES \
+    ((int)(TEMP_CALIBRATION_MS / SAMPLE_PERIOD_MS))
 
 void temperature_task(void * /*arg*/)
 {
@@ -67,9 +73,10 @@ void temperature_task(void * /*arg*/)
 
     if (num_devices == 0) {
         ESP_LOGE(TAG, "No DS18B20 devices detected; marking calibrated and exiting");
-        /* Even on failure, set the calibrated bit so the status LED
-         * can proceed to COMPLETE instead of blinking forever. */
+        /* Fail-open both temp bits: LED proceeds, monitor may arm (a
+         * missing sensor must not kill fall/collision alerting). */
         axion_state_set_ready(BIT_TEMP_CALIBRATED);
+        axion_state_set_ready(BIT_TEMP_MIN_REACHED);
         owb_uninitialize(owb);
         vTaskDelete(nullptr);
         return;
@@ -98,31 +105,40 @@ void temperature_task(void * /*arg*/)
 
     /* ---- Calibration state ---- */
     bool first_run = calibration_store_is_flag_set(CAL_FLAG_FIRST_RUN);
-    bool calibrated = !first_run;   /* non-first-run: already calibrated */
-    bool first_reading = true;
-    int64_t cal_start_ms = 0;
-    float    cal_sum   = 0.0f;
-    int      cal_count = 0;
+
+    float stored_baseline      = TEMP_BASELINE_DEFAULT;
+    bool  have_stored_baseline = false;
+    bool  baseline_published   = false;
 
     if (first_run) {
-        ESP_LOGI(TAG, "first run: will calibrate for %u ms after first reading",
-                 TEMP_CALIBRATION_MS);
+        ESP_LOGI(TAG, "first run: will calibrate from %u ms of on-body "
+                      "samples", TEMP_CALIBRATION_MS);
     } else {
-        /* Only push a baseline that actually exists. The default is a
-         * core-temp guess while the DS18B20 measures SKIN: bench ambient
-         * ~28 C against 35 C trips "hypothermia" on every boot and pages
-         * the emergency number. No baseline -> alerting disabled. */
-        float stored = TEMP_BASELINE_DEFAULT;
-        if (calibration_store_get_temp_baseline(&stored) == ESP_OK) {
-            ESP_LOGI(TAG, "loaded temp baseline from NVS: %.2f C", stored);
-            axion_state_set_temp_baseline(stored);
+        /* Warm boot: the calibration phase is already done; the stored
+         * baseline is published once a reading says the probe is on
+         * skin. */
+        axion_state_set_ready(BIT_TEMP_CALIBRATED);
+        if (calibration_store_get_temp_baseline(&stored_baseline) == ESP_OK) {
+            have_stored_baseline = true;
+            ESP_LOGI(TAG, "loaded temp baseline from NVS: %.2f C (published "
+                          "once a reading reaches %.2f C)",
+                     (double)stored_baseline,
+                     (double)TEMP_BASELINE_DEFAULT);
         } else {
             ESP_LOGW(TAG, "no temp baseline in NVS - temperature alerting "
-                          "DISABLED until calibration (default %.2f C "
-                          "not used for alerts)",
-                     (double)TEMP_BASELINE_DEFAULT);
+                          "DISABLED until calibration");
         }
     }
+
+    float   cal_sum   = 0.0f;
+    int     cal_count = 0;
+    bool    min_reached   = false;
+    bool    first_reading = true;
+    int64_t last_good_read_ms = esp_timer_get_time() / 1000;
+
+    /* Fail-open watchdog state (a silent probe must not block the
+     * monitor's arming gate forever). */
+    bool read_fail_open = false;
 
     TickType_t last_wake = xTaskGetTickCount();
 
@@ -134,45 +150,81 @@ void temperature_task(void * /*arg*/)
         DS18B20_ERROR err = ds18b20_read_temp(devices[0], &reading);
 
         if (err == DS18B20_OK) {
+            last_good_read_ms = esp_timer_get_time() / 1000;
             axion_state_set_temp(reading);
 
             if (first_reading) {
-                ESP_LOGI(TAG, "first reading: %.2f C", reading);
+                ESP_LOGI(TAG, "first reading: %.2f C%s",
+                         (double)reading,
+                         (reading < TEMP_BASELINE_DEFAULT)
+                             ? " - below minimum, waiting for skin contact"
+                             : "");
                 axion_state_set_ready(BIT_TEMP_READY);
                 first_reading = false;
-
-                if (first_run) {
-                    cal_start_ms = esp_timer_get_time() / 1000;
-                    ESP_LOGI(TAG, "calibration window started");
-                } else {
-                    /* Non-first-run: calibration was done previously. */
-                    axion_state_set_ready(BIT_TEMP_CALIBRATED);
-                    calibrated = true;
-                }
             }
 
-            /* Accumulate during the calibration window. */
-            if (first_run && !calibrated) {
-                cal_sum += reading;
-                cal_count++;
-                int64_t elapsed = (esp_timer_get_time() / 1000) - cal_start_ms;
-                if (elapsed >= (int64_t)TEMP_CALIBRATION_MS) {
-                    float avg = (cal_count > 0) ? (cal_sum / cal_count) : 0.0f;
-                    ESP_LOGI(TAG, "calibration done: %d samples, avg=%.2f C",
-                             cal_count, avg);
-                    /* Persist the baseline to NVS so future boots use it
-                     * without re-calibrating, and push it to shared state
-                     * so the monitor can compute thresholds immediately. */
-                    if (cal_count > 0) {
-                        calibration_store_set_temp_baseline(avg);
-                        axion_state_set_temp_baseline(avg);
+            /* ---- On-body check: the current reading is the signal. -- */
+            if (reading >= TEMP_BASELINE_DEFAULT) {
+                if (!min_reached) {
+                    min_reached = true;
+                    axion_state_set_ready(BIT_TEMP_MIN_REACHED);
+                    ESP_LOGI(TAG, "reading at/above %.2f C - probe on skin, "
+                                  "monitor may arm%s",
+                             (double)TEMP_BASELINE_DEFAULT,
+                             first_run ? "; calibration window started" : "");
+                }
+
+                if (first_run) {
+                    /* Count on-body samples only: taking the device
+                     * off mid-window merely pauses calibration. */
+                    cal_sum += reading;
+                    cal_count++;
+                    if (cal_count >= TEMP_CAL_SAMPLES) {
+                        float avg = cal_sum / (float)cal_count;
+                        ESP_LOGI(TAG, "calibration done: %d samples, "
+                                      "avg=%.2f C", cal_count, (double)avg);
+                        /* Persist + publish only plausible averages; a
+                         * sub-minimum avg means the device came off mid-cal. */
+                        if (avg >= TEMP_BASELINE_PLAUSIBLE_MIN_C) {
+                            calibration_store_set_temp_baseline(avg);
+                            axion_state_set_temp_baseline(avg);
+                        } else {
+                            ESP_LOGW(TAG, "calibration avg %.2f C below "
+                                          "plausible skin temperature - "
+                                          "not stored; temp alerting stays "
+                                          "disabled",
+                                     (double)avg);
+                        }
+                        axion_state_set_ready(BIT_TEMP_CALIBRATED);
+                        first_run = false;   /* cal phase done */
                     }
-                    axion_state_set_ready(BIT_TEMP_CALIBRATED);
-                    calibrated = true;
+                } else if (have_stored_baseline && !baseline_published) {
+                    /* Warm boot: first on-body reading arms temp
+                     * alerting with the stored baseline. */
+                    baseline_published = true;
+                    axion_state_set_temp_baseline(stored_baseline);
+                    ESP_LOGI(TAG, "probe on skin (%.2f C) - temp alerting "
+                                  "armed (baseline %.2f C)",
+                             (double)reading, (double)stored_baseline);
                 }
             }
         } else {
             ESP_LOGW(TAG, "DS18B20 read error on device 0: %d", (int)err);
+        }
+
+        /* Fail-open: probe absent or gone silent before reaching the
+         * minimum - release the monitor gate so fall/collision
+         * alerting survive a dead sensor. A probe that keeps reading
+         * (ambient included) never triggers this. */
+        if (!min_reached && !read_fail_open &&
+            (esp_timer_get_time() / 1000) - last_good_read_ms >=
+                (int64_t)TEMP_FIRST_READ_TIMEOUT_MS) {
+            read_fail_open = true;
+            ESP_LOGE(TAG, "no DS18B20 reading for %u ms - releasing monitor "
+                          "gate, temp alerting DISABLED",
+                     (unsigned)TEMP_FIRST_READ_TIMEOUT_MS);
+            axion_state_set_ready(BIT_TEMP_MIN_REACHED);
+            axion_state_set_ready(BIT_TEMP_CALIBRATED);
         }
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
