@@ -1,15 +1,9 @@
 #pragma once
 /**
- * alert_button.h - Hardware button that aborts the emergency countdown.
+ * alert_button.h - Button that aborts the emergency countdown.
  *
- * A short press at any time during the monitor task's WARNING or ALERT
- * phase resets the state machine to NORMAL and prevents the SMS from
- * being sent. The button is debounced in software.
- *
- * Implementation: GPIO falling-edge ISR enqueues a timestamp; a
- * debounce task consumes the queue, drops events that arrive less than
- * BUTTON_DEBOUNCE_MS apart, and sets BIT_ALERT_ABORT in g_sensors_ready.
- * The monitor task consumes that bit via xEventGroupWaitBits.
+ * A press during WARNING/ALERT returns the monitor to NORMAL and prevents the
+ * SMS. ISR -> queue -> debounce task -> BIT_ALERT_ABORT.
  */
 #ifndef AXION_ALERT_BUTTON_H
 #define AXION_ALERT_BUTTON_H

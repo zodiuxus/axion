@@ -34,9 +34,14 @@ extern "C" void axion_state_wait_all(uint32_t bits)
     xEventGroupWaitBits(g_sensors_ready, bits, pdFALSE, pdTRUE, portMAX_DELAY);
 }
 
-extern "C" void axion_state_wait_any(uint32_t bits)
+extern "C" bool axion_state_wait_all_timeout(uint32_t bits, uint32_t timeout_ms)
 {
-    xEventGroupWaitBits(g_sensors_ready, bits, pdFALSE, pdFALSE, portMAX_DELAY);
+    if (g_sensors_ready == nullptr) {
+        return false;
+    }
+    const EventBits_t got = xEventGroupWaitBits(g_sensors_ready, bits, pdFALSE,
+                                                pdTRUE, pdMS_TO_TICKS(timeout_ms));
+    return (got & bits) == bits;
 }
 
 extern "C" void axion_state_set_ready(uint32_t bits)
@@ -74,6 +79,7 @@ extern "C" void axion_state_set_ypr(const float ypr[3])
         s_state.ypr[0] = ypr[0];
         s_state.ypr[1] = ypr[1];
         s_state.ypr[2] = ypr[2];
+        s_state.ypr_ms = esp_timer_get_time() / 1000;
         xSemaphoreGive(s_state_mutex);
     }
 }
@@ -103,7 +109,8 @@ extern "C" void axion_state_note_gnss_no_fix(void)
 extern "C" void axion_state_set_temp(float temp_c)
 {
     if (s_state_mutex && xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-        s_state.temp_c = temp_c;
+        s_state.temp_c  = temp_c;
+        s_state.temp_ms = esp_timer_get_time() / 1000;
         xSemaphoreGive(s_state_mutex);
     }
 }
@@ -124,6 +131,7 @@ extern "C" void axion_state_set_oximetry(int heart_rate, float spo2, bool valid)
         s_state.spo2       = spo2;
         s_state.spo2_valid = valid;
         s_state.oxim_seq++;
+        s_state.oxim_ms    = esp_timer_get_time() / 1000;
         xSemaphoreGive(s_state_mutex);
     }
 }

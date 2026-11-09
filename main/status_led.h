@@ -2,18 +2,9 @@
 /**
  * status_led.h - Green status LED task.
  *
- * LED behaviour:
- *   - BOOTING (things starting up):  blink 25 ms on / 75 ms off (100 ms period)
- *   - CALIBRATING (first run only): blink 50 ms on / 150 ms off (200 ms period)
- *   - COMPLETE: solid on for 2 s, then off permanently
- *
- * On a non-first-run boot the CALIBRATING phase is skipped - the LED
- * goes straight from BOOTING to COMPLETE once all sensors have set
- * their BIT_*_CALIBRATED bits.
- *
- * A safety timeout (LED_CALIBRATION_TIMEOUT_MS) ensures the LED reaches
- * COMPLETE even if a sensor fails to initialize and never sets its
- * calibrated bit.
+ * BOOTING: 25 ms on / 75 ms off. CALIBRATING (first run only): 50/150.
+ * COMPLETE: solid 2 s, then off. LED_CALIBRATION_TIMEOUT_MS guarantees the
+ * COMPLETE state even if a sensor never calibrates.
  */
 #ifndef AXION_STATUS_LED_H
 #define AXION_STATUS_LED_H

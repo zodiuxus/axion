@@ -6,6 +6,8 @@
 #include <cstring>
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "axion.cal";
 
@@ -16,6 +18,25 @@ static const char *NVS_KEY_MPU_OFFSETS   = "mpu_offs";
 
 static uint32_t s_cached_flags = 0;
 static bool     s_initialized  = false;
+/* Guards s_cached_flags and every read-modify-write of it. Four tasks touch
+ * the flags (temperature, oximetry, MPU setup, status LED); without this the
+ * plain |= / &= sequences lose updates and persist the loser. */
+static SemaphoreHandle_t s_flags_lock = nullptr;
+
+static bool flags_lock(void)
+{
+    if (s_flags_lock == nullptr) {
+        return false;
+    }
+    return xSemaphoreTake(s_flags_lock, pdMS_TO_TICKS(1000)) == pdTRUE;
+}
+
+static void flags_unlock(void)
+{
+    if (s_flags_lock != nullptr) {
+        xSemaphoreGive(s_flags_lock);
+    }
+}
 
 esp_err_t calibration_store_init(void)
 {
@@ -31,38 +52,55 @@ esp_err_t calibration_store_init(void)
         return err;
     }
 
+    if (s_flags_lock == nullptr) {
+        s_flags_lock = xSemaphoreCreateMutex();
+        if (s_flags_lock == nullptr) {
+            ESP_LOGE(TAG, "flags lock allocation failed - flag updates are racy");
+        }
+    }
+
     nvs_handle_t h;
     err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
     if (err == ESP_OK) {
         err = nvs_get_u32(h, NVS_KEY, &s_cached_flags);
-        if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-            ESP_LOGE(TAG, "NVS read failed: %s", esp_err_to_name(err));
-        }
         nvs_close(h);
     }
-    /* Missing key = first-ever boot: default to first-run. */
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "calibration flags = 0x%08lx", (unsigned long)s_cached_flags);
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        /* Missing key = first-ever boot. */
         s_cached_flags = CAL_FLAG_FIRST_RUN;
         ESP_LOGI(TAG, "NVS key not found; defaulting to first-run=true (0x%08lx)",
                  (unsigned long)s_cached_flags);
     } else {
-        ESP_LOGI(TAG, "calibration flags = 0x%08lx", (unsigned long)s_cached_flags);
+        /* Corrupt, unreadable or wrong-typed flag word: treat the device as
+         * unprovisioned instead of pretending it is calibrated. The old code
+         * fell through with flags == 0, which is "calibrated, no baseline"
+         * and disabled temperature alerting for good. */
+        s_cached_flags = CAL_FLAG_FIRST_RUN;
+        ESP_LOGE(TAG, "NVS flag read failed (%s); defaulting to first-run=true",
+                 esp_err_to_name(err));
     }
 
     s_initialized = true;
     return ESP_OK;
 }
 
-uint32_t calibration_store_get_flags(void)
-{
-    return s_cached_flags;
-}
-
 bool calibration_store_is_flag_set(uint32_t flag)
 {
-    return (s_cached_flags & flag) != 0;
+    if (!flags_lock()) {
+        /* Never block an alerting path on the store: a torn read here only
+         * affects first-run bookkeeping, not sensor data. */
+        return (s_cached_flags & flag) != 0;
+    }
+    const bool set = (s_cached_flags & flag) != 0;
+    flags_unlock();
+    return set;
 }
 
+/* Caller must hold s_flags_lock: the cached word and the persisted word are
+ * updated as one step so two writers cannot lose each other's bits. */
 static esp_err_t persist_flags(void)
 {
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
@@ -85,18 +123,30 @@ static esp_err_t persist_flags(void)
 
 esp_err_t calibration_store_set_flag(uint32_t flag)
 {
+    if (!flags_lock()) {
+        ESP_LOGE(TAG, "set flag 0x%08lx: flags lock timeout", (unsigned long)flag);
+        return ESP_ERR_TIMEOUT;
+    }
     s_cached_flags |= flag;
     ESP_LOGI(TAG, "set flag 0x%08lx -> flags now 0x%08lx",
              (unsigned long)flag, (unsigned long)s_cached_flags);
-    return persist_flags();
+    const esp_err_t err = persist_flags();
+    flags_unlock();
+    return err;
 }
 
 esp_err_t calibration_store_clear_flag(uint32_t flag)
 {
+    if (!flags_lock()) {
+        ESP_LOGE(TAG, "clear flag 0x%08lx: flags lock timeout", (unsigned long)flag);
+        return ESP_ERR_TIMEOUT;
+    }
     s_cached_flags &= ~flag;
     ESP_LOGI(TAG, "clear flag 0x%08lx -> flags now 0x%08lx",
              (unsigned long)flag, (unsigned long)s_cached_flags);
-    return persist_flags();
+    const esp_err_t err = persist_flags();
+    flags_unlock();
+    return err;
 }
 
 esp_err_t calibration_store_request_factory_reset(void)

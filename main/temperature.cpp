@@ -1,20 +1,12 @@
 /**
  * temperature.cpp - DS18B20 1-Wire body-temperature task.
  *
- * The current reading is the only signal: >= TEMP_BASELINE_DEFAULT
- * means the probe is on skin - arm the monitor (BIT_TEMP_MIN_REACHED),
- * run the first-run calibration window, publish the stored baseline on
- * later boots. Below it the probe is off the body and the monitor's own
- * per-poll minimum check keeps the temp channel inert. No settle /
- * flatness gating - the arm minimum makes it redundant.
+ * TEMP_BASELINE_PLAUSIBLE_MIN_C only decides whether there is skin in contact
+ * (arming bit + calibration samples); the alert band is baseline +/- delta in
+ * alert_policy.cpp.
  *
- * First-run calibration averages TEMP_CALIBRATION_MS' worth of ON-BODY
- * samples only, so off-body time merely pauses it. Only hardware faults
- * fail open: an absent or silent probe releases the monitor gate after
- * TEMP_FIRST_READ_TIMEOUT_MS so fall/collision alerting survive.
- *
- * CAL_FLAG_FIRST_RUN is cleared by the status LED once ALL sensors set
- * their BIT_*_CALIBRATED bits (a mid-calibration reboot re-runs it).
+ * An absent or silent probe fails open after TEMP_FIRST_READ_TIMEOUT_MS so
+ * fall/collision alerting survives.
  */
 #include "temperature.h"
 
@@ -73,8 +65,11 @@ void temperature_task(void * /*arg*/)
 
     if (num_devices == 0) {
         ESP_LOGE(TAG, "No DS18B20 devices detected; marking calibrated and exiting");
-        /* Fail-open both temp bits: LED proceeds, monitor may arm (a
-         * missing sensor must not kill fall/collision alerting). */
+        /* Fail-open all three temp bits: the LED may commit the calibration
+         * (there is nothing to calibrate), the monitor may arm (a missing
+         * sensor must not kill fall/collision alerting), and the alerting
+         * channels stay inert because no reading is ever published. */
+        axion_state_set_ready(BIT_TEMP_SENSOR_ABSENT);
         axion_state_set_ready(BIT_TEMP_CALIBRATED);
         axion_state_set_ready(BIT_TEMP_MIN_REACHED);
         owb_uninitialize(owb);
@@ -103,31 +98,35 @@ void temperature_task(void * /*arg*/)
     owb_use_strong_pullup_gpio(owb, CONFIG_STRONG_PULLUP_GPIO);
 #endif
 
-    /* ---- Calibration state ---- */
+    /* Calibration is complete when a plausible baseline is stored, not when a
+     * timer expires; a stored baseline is never recalculated. */
     bool first_run = calibration_store_is_flag_set(CAL_FLAG_FIRST_RUN);
 
     float stored_baseline      = TEMP_BASELINE_DEFAULT;
-    bool  have_stored_baseline = false;
+    bool  have_stored_baseline = (calibration_store_get_temp_baseline(&stored_baseline) == ESP_OK);
     bool  baseline_published   = false;
 
-    if (first_run) {
-        ESP_LOGI(TAG, "first run: will calibrate from %u ms of on-body "
-                      "samples", TEMP_CALIBRATION_MS);
+    /* Self-heal the state older firmware could leave behind: FIRST_RUN cleared
+     * without a stored baseline, which silently disabled temperature alerting.
+     * Re-provision instead of staying degraded forever. */
+    if (!first_run && !have_stored_baseline) {
+        ESP_LOGW(TAG, "FIRST_RUN clear but no baseline stored - re-provisioning "
+                      "temperature calibration");
+        calibration_store_set_flag(CAL_FLAG_FIRST_RUN);
+        first_run = true;
+    }
+
+    bool calibrating = first_run && !have_stored_baseline;
+
+    if (calibrating) {
+        ESP_LOGI(TAG, "calibrating: %u ms of on-body samples",
+                 TEMP_CALIBRATION_MS);
     } else {
-        /* Warm boot: the calibration phase is already done; the stored
-         * baseline is published once a reading says the probe is on
-         * skin. */
+        /* No temperature calibration window this boot. */
         axion_state_set_ready(BIT_TEMP_CALIBRATED);
-        if (calibration_store_get_temp_baseline(&stored_baseline) == ESP_OK) {
-            have_stored_baseline = true;
-            ESP_LOGI(TAG, "loaded temp baseline from NVS: %.2f C (published "
-                          "once a reading reaches %.2f C)",
-                     (double)stored_baseline,
-                     (double)TEMP_BASELINE_DEFAULT);
-        } else {
-            ESP_LOGW(TAG, "no temp baseline in NVS - temperature alerting "
-                          "DISABLED until calibration");
-        }
+        ESP_LOGI(TAG, "temp calibration already stored: %.2f C (published on "
+                      "the first plausible contact reading)",
+                 (double)stored_baseline);
     }
 
     float   cal_sum   = 0.0f;
@@ -156,27 +155,27 @@ void temperature_task(void * /*arg*/)
             if (first_reading) {
                 ESP_LOGI(TAG, "first reading: %.2f C%s",
                          (double)reading,
-                         (reading < TEMP_BASELINE_DEFAULT)
-                             ? " - below minimum, waiting for skin contact"
+                         (reading < TEMP_BASELINE_PLAUSIBLE_MIN_C)
+                             ? " - below plausible skin temperature, waiting for contact"
                              : "");
                 axion_state_set_ready(BIT_TEMP_READY);
                 first_reading = false;
             }
 
-            /* ---- On-body check: the current reading is the signal. -- */
-            if (reading >= TEMP_BASELINE_DEFAULT) {
+            /* Contact gate: arming bit + calibration samples only, not
+             * alerting. */
+            if (reading >= TEMP_BASELINE_PLAUSIBLE_MIN_C) {
                 if (!min_reached) {
                     min_reached = true;
                     axion_state_set_ready(BIT_TEMP_MIN_REACHED);
-                    ESP_LOGI(TAG, "reading at/above %.2f C - probe on skin, "
+                    ESP_LOGI(TAG, "reading at/above %.2f C - probe in contact, "
                                   "monitor may arm%s",
-                             (double)TEMP_BASELINE_DEFAULT,
-                             first_run ? "; calibration window started" : "");
+                             (double)TEMP_BASELINE_PLAUSIBLE_MIN_C,
+                             calibrating ? "; calibration window started" : "");
                 }
 
-                if (first_run) {
-                    /* Count on-body samples only: taking the device
-                     * off mid-window merely pauses calibration. */
+                if (calibrating) {
+                    /* On-body samples only: going off-body pauses the window. */
                     cal_sum += reading;
                     cal_count++;
                     if (cal_count >= TEMP_CAL_SAMPLES) {
@@ -184,23 +183,26 @@ void temperature_task(void * /*arg*/)
                         ESP_LOGI(TAG, "calibration done: %d samples, "
                                       "avg=%.2f C", cal_count, (double)avg);
                         /* Persist + publish only plausible averages; a
-                         * sub-minimum avg means the device came off mid-cal. */
+                         * sub-minimum avg means the device came off mid-cal.
+                         * The status LED commits FIRST_RUN only if a baseline
+                         * is actually stored, so an unfinished or implausible
+                         * calibration retries on the next boot. */
                         if (avg >= TEMP_BASELINE_PLAUSIBLE_MIN_C) {
                             calibration_store_set_temp_baseline(avg);
                             axion_state_set_temp_baseline(avg);
                         } else {
-                            ESP_LOGW(TAG, "calibration avg %.2f C below "
+                            ESP_LOGE(TAG, "calibration avg %.2f C below "
                                           "plausible skin temperature - "
-                                          "not stored; temp alerting stays "
-                                          "disabled",
+                                          "not stored; alerting stays disabled "
+                                          "and the next boot retries",
                                      (double)avg);
                         }
                         axion_state_set_ready(BIT_TEMP_CALIBRATED);
-                        first_run = false;   /* cal phase done */
+                        calibrating = false;   /* window finished for this boot */
                     }
                 } else if (have_stored_baseline && !baseline_published) {
-                    /* Warm boot: first on-body reading arms temp
-                     * alerting with the stored baseline. */
+                    /* First on-body reading arms temp alerting with the stored
+                     * baseline (a previous boot calibrated it). */
                     baseline_published = true;
                     axion_state_set_temp_baseline(stored_baseline);
                     ESP_LOGI(TAG, "probe on skin (%.2f C) - temp alerting "

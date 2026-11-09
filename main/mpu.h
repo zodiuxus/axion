@@ -26,11 +26,6 @@ void mpu_setup(void);
  *  and checks raw-accel magnitude for collision. Runs forever. */
 void mpu_int_task(void *arg);
 
-/** Read raw accel X/Y/Z in g under the configured full-scale range.
- *  @param ax, ay, az  Out: acceleration in g. May be NULL.
- *  @return true on a successful I2C read, false on bus error. */
-bool mpu_get_raw_accel_g(float *ax, float *ay, float *az);
-
 #ifdef __cplusplus
 }
 #endif

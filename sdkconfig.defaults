@@ -5,8 +5,9 @@
 # Target chip
 CONFIG_IDF_TARGET="esp32s3"
 
-# FreeRTOS - use the vanilla (single-core tick) FreeRTOS for predictable
-# mutex semantics across the UART/state mutexes.
+# FreeRTOS - 1000 Hz tick keeps pdMS_TO_TICKS timeouts fine-grained (the UART
+# and state mutexes use millisecond timeouts). The previous comment claimed
+# mutex semantics depend on the tick rate; they do not.
 CONFIG_FREERTOS_HZ=1000
 
 # Partition table - give us a bit of NVS for the calibration_store bitfield.
@@ -19,13 +20,17 @@ CONFIG_NVS_ENCRYPTION=n
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_COLORS=y
 
-# UART - install enough driver slots.
-CONFIG_UART_ISR_IRAM_SAFE=y
+# UART - keep the driver ISR in IRAM so a modem burst is not lost while the
+# flash cache is disabled during an NVS commit. (The previous symbol name,
+# CONFIG_UART_ISR_IRAM_SAFE, does not exist and was silently ignored.)
+CONFIG_UART_ISR_IN_IRAM=y
 
-# I2C - legacy master driver (used by I2Cdev / MPU6050 and our max30102).
+# I2C - the new master driver (driver/i2c_master.h), used by I2Cdev / MPU6050
+# and the MAX30102 task. No legacy i2c.h API is used.
 CONFIG_I2C_ENABLE_DEBUG_LOG=n
 
-# Disable BT/WiFi by default to shrink the binary and avoid bringing
-# up RF calibration that the device doesn't use yet.
+# Bluetooth is off. Wi-Fi cannot be disabled here: CONFIG_ESP_WIFI_ENABLED is a
+# hidden symbol forced on for Wi-Fi-capable SoCs, and nothing in the application
+# references esp_wifi_*, so the blob is not linked. To keep Wi-Fi out of the
+# build entirely, trim the component list in the top-level CMakeLists.txt.
 CONFIG_BT_ENABLED=n
-CONFIG_ESP_WIFI_ENABLED=n

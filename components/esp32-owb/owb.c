@@ -38,7 +38,7 @@
 #include "esp_log.h"
 #include "sdkconfig.h"
 #include "driver/gpio.h"
-#include "rom/gpio.h"       // for gpio_pad_select_gpio()
+#include "rom/gpio.h"       // for rom_gpio_pad_select_gpio()
 
 #include "owb.h"
 #include "owb_gpio.h"
@@ -343,7 +343,7 @@ owb_status owb_use_strong_pullup_gpio(OneWireBus * bus, gpio_num_t gpio)
                 ESP_LOGW(TAG, "Strong pull-up GPIO set with parasitic-power disabled");
             }
 
-            gpio_pad_select_gpio(gpio);
+            rom_gpio_pad_select_gpio(gpio);
             gpio_set_direction(gpio, GPIO_MODE_OUTPUT);
         }
         else

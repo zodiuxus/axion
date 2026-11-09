@@ -1,13 +1,9 @@
 /**
  * modem.cpp - A7670E bring-up + GNSS polling.
  *
- * All UART access goes through at_command.* (mutex-protected). SIM PIN,
- * carrier, and APN come from secrets.h as factory defaults, seeded into
- * NVS on first boot (NVS wins afterwards).
- *
- * The configured PLMN is a preference: manual selection is tried first,
- * then automatic, accepting home (CEREG stat=1) or roaming (stat=5) -
- * so SMS to 112 works from any registered EU network.
+ * All UART access goes through at_command.* (mutex-protected). SIM PIN, carrier
+ * and APN come from secrets.h as factory defaults, seeded into NVS on first
+ * boot (NVS wins afterwards).
  */
 #include "modem.h"
 
@@ -155,8 +151,8 @@ static bool wait_for_registration(uint32_t timeout_ms)
     uint32_t elapsed = 0;
 
     while (elapsed < timeout_ms) {
-        if (at_command_send("AT+CEREG?", 2000, "+CEREG:")) {
-            at_command_last_response(buf, sizeof(buf));
+        if (at_command_send_ex("AT+CEREG?", 2000, "+CEREG:",
+                               buf, sizeof(buf))) {
             /* +CEREG: <n>,<stat>[,...] - find the stat field. */
             char *p = strstr(buf, "+CEREG:");
             if (p) {
@@ -182,14 +178,17 @@ static bool wait_for_registration(uint32_t timeout_ms)
 /* ---- Public tasks --------------------------------------------------- */
 void modem_setup_task(void * /*arg*/)
 {
-    /* Install the UART driver before any at_command_* call. On failure
-     * continue anyway: sensors still work, monitor never unblocks. */
+    /* Install the UART driver before any at_command_* call. If this fails the
+     * modem is unusable for the whole boot: do NOT advertise readiness and do
+     * NOT start the poller, because every AT command would burn its full
+     * timeout against a dead bus. The monitor starts degraded instead
+     *. */
     esp_err_t uart_err = at_modem_init();
     if (uart_err != ESP_OK) {
         ESP_LOGE(TAG, "at_modem_init failed: %s - modem unusable this boot",
                  esp_err_to_name(uart_err));
-        /* Continue anyway: the sensor stack works without the modem, and
-         * the monitor task gates on BIT_AT_READY which we never set. */
+        vTaskDelete(nullptr);
+        return;
     }
 
     ESP_LOGW(TAG, "Bringing up A7670E...");
@@ -270,11 +269,18 @@ void modem_setup_task(void * /*arg*/)
     /* SMS text mode. */
     at_command_send("AT+CMGF=1", 9000, "OK");
 
-    axion_state_set_ready(BIT_AT_READY);
-    /* Arm collision escalation. The monitor's alert loop additionally
-     * waits for BIT_TEMP_CALIBRATED before it starts. */
-    axion_state_set_armed(true);
-    ESP_LOGI(TAG, "A7670E modem ready (SMS path available) - system armed");
+    /* Publish readiness only when the SMS path can actually work. This bit
+     * used to be set unconditionally, even after a failed UART init or with no
+     * registration. The monitor no longer gates on it (it starts on a deadline
+     * and gates each channel itself), so an honest bit here costs nothing and
+     * removes a lie from the diagnostics. */
+    if (registered) {
+        axion_state_set_ready(BIT_AT_READY);
+        ESP_LOGI(TAG, "A7670E registered (home/roaming) - SMS path available");
+    } else {
+        ESP_LOGE(TAG, "A7670E not registered - BIT_AT_READY not set; SMS "
+                      "alerts will fail until the next reset");
+    }
 
     /* Power up GNSS now that the modem is registered. */
     gnss_power_up();
@@ -297,8 +303,8 @@ void modem_gnss_task(void * /*arg*/)
     int     consecutive_no_fix = 0;
 
     while (true) {
-        if (at_command_send("AT+CGNSSINFO", 3000, "+CGNSSINFO:")) {
-            at_command_last_response(local_buf, sizeof(local_buf));
+        if (at_command_send_ex("AT+CGNSSINFO", 3000, "+CGNSSINFO:",
+                               local_buf, sizeof(local_buf))) {
             if (parse_cgnssinfo(local_buf, &lat, &lon, &alt, &spd_knots)) {
                 float speed_ms = spd_knots * 0.5144447f;
                 axion_state_set_gnss(lat, lon, alt, speed_ms);

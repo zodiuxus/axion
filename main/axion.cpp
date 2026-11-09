@@ -1,15 +1,8 @@
 /**
  * axion.cpp - application entry point.
  *
- * Init order: shared state + NVS -> GPIO ISR service + alert button ->
- * one-shot setup tasks (I2C bus, MPU, modem, temp) -> long-running
- * workers (mpu_int, oximetry, monitor, status LED).
- *
- * mpu_int_task is the single consumer of the MPU6050 INT pin and handles
- * both DMP YPR reads and raw-accel collision detection (one INT pin,
- * one task).
- *
- * SIM PIN and alert numbers come from gitignored secrets.h.
+ * Init: state + NVS -> GPIO ISR + button -> one-shot setup (I2C, MPU, modem,
+ * temp) -> long-running tasks.
  */
 #include <cstdio>
 
@@ -22,7 +15,9 @@
 #include "config.h"
 #include "secrets.h"           /* gitignored; copy from secrets.h.example */
 #include "state.h"
+#include "alert_delivery.h"
 #include "calibration_store.h"
+#include "diagnostics.h"
 #include "alert_button.h"
 
 #include "mpu.h"
@@ -47,6 +42,9 @@ extern "C" void app_main(void)
     /* ---- Core init (must come before any task that uses state/NVS) ---- */
     axion_state_init();
     calibration_store_init();
+    /* After NVS: reads the last recorded alert and bumps the RTC boot
+     * counter. */
+    diagnostics_boot_note();
 
     /* One GPIO ISR service for the whole app; modules only attach
      * handlers (a second install logs an ERROR even if handled). */
@@ -57,6 +55,12 @@ extern "C" void app_main(void)
 
     alert_button_init();
 
+    /* Alert delivery state must exist before monitor_task can queue an alert;
+     * the worker itself is created with the other long-running tasks. */
+    if (alert_delivery_init() != ESP_OK) {
+        ESP_LOGE(TAG, "alert delivery init failed - SMS alerts disabled");
+    }
+
     /* ---- One-shot setup tasks (delete themselves when done) ---------- */
     xTaskCreate(temperature_task,      "ds18b20",   4096, nullptr, 1, nullptr);
     xTaskCreate([](void *a){ i2c_bus_setup(); },   "i2c_init",      3072, nullptr, 1, nullptr);
@@ -66,6 +70,9 @@ extern "C" void app_main(void)
     /* ---- Long-running workers -------------------------------------- */
     xTaskCreate(mpu_int_task,          "mpu_int",   8192, nullptr, 3, nullptr);
     xTaskCreate(max30102_task,         "max30102",  8192, nullptr, 2, nullptr);
+    /* Owns the SMS path; the monitor only queues to it. Priority 2 so a long
+     * send does not starve the 200 Hz sensor paths. */
+    xTaskCreate(alert_delivery_task,   "alert_tx",  4096, nullptr, 2, nullptr);
     xTaskCreate(monitor_task,          "monitor",   4096, nullptr, 1, nullptr);
     xTaskCreate(status_led_task,       "status_led",2048, nullptr, 1, nullptr);
 

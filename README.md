@@ -33,7 +33,7 @@
 
 - `secrets.h.example` is the committed template with placeholder values.
 - `secrets.h` is the real per-device file, gitignored.
-- `axion.cpp` has a `static_assert` that refuses to compile if `ALERT_PHONE_1` doesn't start with `+` (i.e. if you forgot to edit the template).
+- `axion.cpp` has a `static_assert` that refuses to compile if `ALERT_PHONE_1` is empty, i.e. if you forgot to edit the template. A local emergency number like `112` is allowed; no `+` prefix is required.
 
 Up to two recipients are supported (`ALERT_PHONE_1`, `ALERT_PHONE_2`); leave the unused one as `""`.
 
@@ -55,7 +55,7 @@ This section will be filled once the final prototype is tested thoroughly.
 - Kalman filter may not be entirely necessary, because the readings are rather accurate for relative rotation and position, however, it might be useful for velocity.
  - Relative rotation means the roll/pitch/yaw depends solely on the initial position the device was in, meaning if someone turned it upside-down then started it, the device will think it's upright.
   - To remedy this, magnetometers may be introduced to set the initial values of the MPU6050 (if such a thing is possible).
-- The MAX30102 driver does no calibration of the SpO2 R-curve; the default `49.7 * R` linearization is coarse. For clinical accuracy you will need to calibrate against a reference oximeter and replace the formula in `max30102_alg_spo2()`. The HR estimator is autocorrelation-based and is robust but slow (~5 s for a full 128-sample window at 40 ms sample period).
+- The MAX30102 driver does no calibration of the SpO2 R-curve; the hard-coded `-45.06 R^2 + 30.354 R + 94.845` fit is coarse. For clinical accuracy you will need to calibrate against a reference oximeter and replace the formula in `max30102_alg_spo2()`. The HR estimator is autocorrelation-based and is robust but slow (~5 s for a full 128-sample window at 40 ms sample period).
 
 ## References and credits
 ### Libraries

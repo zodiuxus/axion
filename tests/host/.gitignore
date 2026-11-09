@@ -1,0 +1,4 @@
+# Host build artifacts produced by run.ps1
+build/
+*.obj
+*.exe

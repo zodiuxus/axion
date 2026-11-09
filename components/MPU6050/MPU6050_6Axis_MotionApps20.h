@@ -492,7 +492,21 @@ uint8_t MPU6050::dmpInitialize() {
             // writeMemoryBlock(dmpUpdate + 3, dmpUpdate[2], dmpUpdate[0], dmpUpdate[1]);
 
             DEBUG_PRINTLN(F("Waiting for FIFO count > 2..."));
-            while ((fifoCount = getFIFOCount()) < 3);
+            /* Bounded wait: the DMP is expected to start streaming here. If
+             * it does not (clone/mislabelled die, or a gyro PLL that never
+             * locks) an unbounded spin would stall the boot forever - the
+             * task watchdog only warns by default. 200 x 10 ms = 2 s. */
+            for (uint16_t dmp_wait = 0; dmp_wait < 200; ++dmp_wait) {
+                fifoCount = getFIFOCount();
+                if (fifoCount >= 3) {
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            if (fifoCount < 3) {
+                DEBUG_PRINTLN(F("ERROR! DMP is not producing packets."));
+                return 4;   /* 1 = code block, 2 = config block, 4 = no data */
+            }
 
             DEBUG_PRINTLN(F("Current FIFO count="));
             DEBUG_PRINT(fifoCount);
@@ -509,7 +523,21 @@ uint8_t MPU6050::dmpInitialize() {
             // readMemoryBlock(dmpUpdate + 3, dmpUpdate[2], dmpUpdate[0], dmpUpdate[1]);
 
             DEBUG_PRINTLN(F("Waiting for FIFO count > 2..."));
-            while ((fifoCount = getFIFOCount()) < 3);
+            /* Bounded wait: the DMP is expected to start streaming here. If
+             * it does not (clone/mislabelled die, or a gyro PLL that never
+             * locks) an unbounded spin would stall the boot forever - the
+             * task watchdog only warns by default. 200 x 10 ms = 2 s. */
+            for (uint16_t dmp_wait = 0; dmp_wait < 200; ++dmp_wait) {
+                fifoCount = getFIFOCount();
+                if (fifoCount >= 3) {
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            if (fifoCount < 3) {
+                DEBUG_PRINTLN(F("ERROR! DMP is not producing packets."));
+                return 4;   /* 1 = code block, 2 = config block, 4 = no data */
+            }
 
             DEBUG_PRINTLN(F("Current FIFO count="));
             DEBUG_PRINT(fifoCount);

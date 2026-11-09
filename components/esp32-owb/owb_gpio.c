@@ -39,7 +39,7 @@
 #include "sdkconfig.h"
 #include "driver/gpio.h"
 #include "rom/ets_sys.h"    // for ets_delay_us()
-#include "rom/gpio.h"       // for gpio_pad_select_gpio()
+#include "rom/gpio.h"       // for rom_gpio_pad_select_gpio()
 
 #include "owb.h"
 #include "owb_gpio.h"
@@ -273,7 +273,7 @@ OneWireBus* owb_gpio_initialize(owb_gpio_driver_info * driver_info, int gpio)
     driver_info->bus.strong_pullup_gpio = GPIO_NUM_NC;
 
     // platform specific:
-    gpio_pad_select_gpio(driver_info->gpio);
+    rom_gpio_pad_select_gpio(driver_info->gpio);
 
 #ifdef PHY_DEBUG
     gpio_config_t io_conf;

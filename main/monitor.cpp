@@ -1,25 +1,16 @@
 /**
- * monitor.cpp - Fall, vitals, and collision monitor.
+ * monitor.cpp - Fall, temperature, vitals and collision monitor.
  *
- * State machine: NORMAL -> WARNING (5 s) -> ALERT (5 s, buzzer) -> SMS.
- * Starts only after MPU + modem are up and the temp reading has
- * reached the arm minimum (probe on skin; fail-open only for an
- * absent or silent probe).
+ * NORMAL -> WARNING (WARNING_MS) -> ALERT (ALERT_MS, buzzer) -> SMS.
+ * alert_policy decides, alert_delivery sends; this file owns the sequence, the
+ * buzzer and the abort button.
  *
- *   BIT_ALERT_ABORT (button) - cancel to NORMAL at any point; arms an
- *       abort cooldown so WARNING isn't re-entered while the condition
- *       persists.
- *   BIT_COLLISION_DETECTED - bypass WARNING, jump straight to ALERT.
- *       A collision ALERT is sticky: it runs its full window (a real
- *       impact shouldn't be cancelled by coming to rest); the button
- *       is still the escape hatch. Collision alerts ignore both
- *       cooldowns.
+ * BIT_ALERT_ABORT cancels to NORMAL and arms the abort cooldown.
+ * BIT_COLLISION_DETECTED skips WARNING; a collision ALERT is sticky.
  */
 #include "monitor.h"
 
 #include <cmath>
-#include <cstdio>
-#include <cstring>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -28,85 +19,123 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
-#include "at_command.h"
+#include "alert_delivery.h"
+#include "alert_message.h"
+#include "alert_policy.h"
 #include "config.h"
-#include "secrets.h"
+#include "diagnostics.h"
 #include "state.h"
 
 static const char *TAG = "axion.monitor";
 
-/* Recipients from secrets.h, in priority order; empty slots skipped. */
-static const char *const k_alert_phones[AXION_ALERT_PHONE_MAX_COUNT] = {
-    ALERT_PHONE_1,
-    ALERT_PHONE_2,
+/* Snapshot -> policy inputs, applying the freshness limits: a field whose
+ * producer stopped is marked not fresh. */
+static void build_inputs(const axion_state_t *s, int64_t now_ms,
+                         alert_inputs_t *in)
+{
+    in->imu_fresh = (s->ypr_ms > 0) &&
+                    ((now_ms - s->ypr_ms) <= (int64_t)YPR_STALE_MS);
+    in->roll_deg  = s->ypr[2] * 180.0f / (float)M_PI;
+
+    in->gnss_fresh = s->gnss_fix_valid && (s->gnss_fix_ms > 0) &&
+                     ((now_ms - s->gnss_fix_ms) <= (int64_t)GNSS_STALE_MS);
+    in->speed_mps  = s->speed;
+
+    in->temp_fresh          = (s->temp_ms > 0) &&
+                              ((now_ms - s->temp_ms) <= (int64_t)TEMP_STALE_MS);
+    in->temp_baseline_valid = s->temp_baseline_valid;
+    in->temp_c              = s->temp_c;
+    in->temp_baseline       = s->temp_baseline;
+
+    in->oxim_fresh = (s->oxim_ms > 0) &&
+                     ((now_ms - s->oxim_ms) <= (int64_t)OXIM_STALE_MS);
+    in->oxim_seq   = s->oxim_seq;
+    in->spo2_valid = s->spo2_valid;
+    in->heart_rate = s->heart_rate;
+    in->spo2       = s->spo2;
+}
+
+/* Freshness transitions while running; GNSS is excluded (no fix indoors is
+ * normal and the poller reports it). */
+enum { LIV_IMU = 0, LIV_TEMP, LIV_OXIM, LIV_COUNT };
+static const char *const k_liveness_name[LIV_COUNT] = {
+    "IMU", "temperature", "oximetry",
 };
 
-/* Build the SMS body: trigger type + position (marked LAST KNOWN if the
- * fix is stale, NO GPS FIX if none this boot) + vitals. */
-static void send_alert_sms(const axion_state_t *s, bool collision_triggered)
+static void log_liveness(const alert_inputs_t *in, int64_t now_ms)
 {
-    char msg[200];
-    int64_t now_ms = esp_timer_get_time() / 1000;
-    int64_t fix_age_s = (s->gnss_fix_ms > 0) ? (now_ms - s->gnss_fix_ms) / 1000 : -1;
+    static bool    s_prev[LIV_COUNT]        = {true, true, true};
+    static int64_t s_stale_since[LIV_COUNT] = {0, 0, 0};
+    static bool    s_seen                   = false;
 
-    if (s->gnss_fix_valid) {
-        snprintf(msg, sizeof(msg),
-                 "AXION ALERT: %s. "
-                 "lat=%.6f lon=%.6f alt=%.1f spd=%.1fm/s "
-                 "temp=%.2fC hr=%d spo2=%.1f%%",
-                 collision_triggered ? "collision detected" : "fall/vitals",
-                 s->lat, s->lon, s->alt, s->speed,
-                 s->temp_c, s->heart_rate, s->spo2);
-    } else if (fix_age_s >= 0) {
-        snprintf(msg, sizeof(msg),
-                 "AXION ALERT: %s. "
-                 "lat=%.6f lon=%.6f (LAST KNOWN, %llds old) alt=%.1f "
-                 "temp=%.2fC hr=%d spo2=%.1f%%",
-                 collision_triggered ? "collision detected" : "fall/vitals",
-                 s->lat, s->lon, (long long)fix_age_s, s->alt,
-                 s->temp_c, s->heart_rate, s->spo2);
-    } else {
-        /* Never had a fix this boot at all - don't send a bogus 0,0. */
-        snprintf(msg, sizeof(msg),
-                 "AXION ALERT: %s. "
-                 "NO GPS FIX YET "
-                 "temp=%.2fC hr=%d spo2=%.1f%%",
-                 collision_triggered ? "collision detected" : "fall/vitals",
-                 s->temp_c, s->heart_rate, s->spo2);
+    const bool fresh[LIV_COUNT] = {
+        in->imu_fresh, in->temp_fresh, in->oxim_fresh,
+    };
+
+    if (!s_seen) {
+        for (int i = 0; i < LIV_COUNT; ++i) {
+            s_prev[i] = fresh[i];
+        }
+        s_seen = true;
+        return;
     }
 
-    for (int i = 0; i < AXION_ALERT_PHONE_MAX_COUNT; ++i) {
-        if (k_alert_phones[i] == nullptr || k_alert_phones[i][0] == '\0') continue;
-        ESP_LOGW(TAG, "Sending alert to %s", k_alert_phones[i]);
-        bool ok = at_command_send_sms_body(k_alert_phones[i], msg);
-        ESP_LOGI(TAG, "  -> %s", ok ? "OK" : "FAILED");
+    for (int i = 0; i < LIV_COUNT; ++i) {
+        if (s_prev[i] && !fresh[i]) {
+            s_stale_since[i] = now_ms;
+            ESP_LOGW(TAG, "%s data stale - channel suspended until it recovers",
+                     k_liveness_name[i]);
+        } else if (!s_prev[i] && fresh[i]) {
+            const int64_t outage_ms =
+                (s_stale_since[i] > 0) ? (now_ms - s_stale_since[i]) : 0;
+            ESP_LOGW(TAG, "%s data recovered after %lld ms",
+                     k_liveness_name[i], (long long)outage_ms);
+        }
+        s_prev[i] = fresh[i];
     }
 }
 
 void monitor_task(void * /*arg*/)
 {
-    /* MPU (fall + collision), modem (SMS), and the probe reading at
-     * the arm minimum (BIT_TEMP_MIN_REACHED). Temp alerts additionally
-     * require a valid baseline and an at-minimum reading. */
-    axion_state_wait_all(BIT_MPU_READY | BIT_AT_READY | BIT_TEMP_MIN_REACHED);
+    /* Start even if a sensor never arrives: freshness gates each channel, so a
+     * degraded start is safe. */
+    const uint32_t required = BIT_MPU_READY | BIT_AT_READY | BIT_TEMP_MIN_REACHED;
+    const EventBits_t ready = xEventGroupWaitBits(g_sensors_ready, required,
+                                                  pdFALSE /* don't clear */,
+                                                  pdTRUE  /* wait for all */,
+                                                  pdMS_TO_TICKS(ARM_TIMEOUT_MS));
+    const uint32_t missing = required & ~((uint32_t)ready);
+    if (missing != 0u) {
+        ESP_LOGE(TAG, "arming incomplete after %u ms (missing bits 0x%x) - "
+                      "starting degraded", (unsigned)ARM_TIMEOUT_MS,
+                 (unsigned)missing);
+    }
+
+    /* Collision escalation is allowed from here on, independent of the modem. */
+    axion_state_set_armed(true);
+    diagnostics_mark_steady();
+
+    /* Drop a pre-arm abort edge so it is not replayed as a fresh press. */
+    xEventGroupClearBits(g_sensors_ready, BIT_ALERT_ABORT);
+    ESP_LOGI(TAG, "monitor started (mpu=%d modem=%d probe_min=%d)",
+             (int)((ready & BIT_MPU_READY) != 0),
+             (int)((ready & BIT_AT_READY) != 0),
+             (int)((ready & BIT_TEMP_MIN_REACHED) != 0));
 
     gpio_reset_pin(PIN_BUZZER);
     gpio_set_direction(PIN_BUZZER, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_BUZZER, 0);
 
     typedef enum { NORMAL, WARNING, ALERT } state_t;
-    state_t  state                 = NORMAL;
-    int64_t  state_start_ms        = 0;
-    int64_t  abort_cooldown_until  = 0;   /* suppresses re-trigger after abort */
-    int64_t  sms_cooldown_until    = 0;   /* suppresses re-page cycles after an SMS */
+    state_t state                  = NORMAL;
+    int64_t state_start_ms         = 0;
     /* True while the current ALERT is collision-triggered (sticky). */
-    bool     collision_alert_active = false;
-    /* Vitals debounce: count consecutive abnormal VALID windows;
-     * oxim_seq makes the 100 ms poll count each window exactly once. */
-    uint32_t last_oxim_seq = 0;
-    int      vitals_streak = 0;
+    bool    collision_alert_active = false;
 
-    axion_state_t snap;
+    alert_policy_t policy;
+    alert_policy_init(&policy);
+
+    axion_state_t snap = {};
 
     while (true) {
         /* Wait up to 100 ms for either a tick or an edge signal.
@@ -127,14 +156,42 @@ void monitor_task(void * /*arg*/)
                 gpio_set_level(PIN_BUZZER, 0);
                 ESP_LOGW(TAG, "alert aborted by button");
             }
+            alert_policy_note_abort(&policy, now_ms);
             state                  = NORMAL;
             collision_alert_active = false;
-            abort_cooldown_until   = now_ms + ABORT_COOLDOWN_MS;
             continue;
         }
 
-        /* Fresh snapshot for the SMS body regardless of trigger path. */
+        /* Only a delivered alert starts the re-page cooldown; a failed send
+         * stays free to re-alert. */
+        uint32_t delivered = alert_delivery_take_delivered();
+        if (delivered != 0u) {
+            ESP_LOGI(TAG, "alert delivered (0x%x) - starting re-page cooldown",
+                     (unsigned)delivered);
+            alert_policy_note_paged(&policy, delivered, now_ms);
+        }
+
+        /* Fresh snapshot for the decision. */
         axion_state_snapshot(&snap);
+
+        alert_inputs_t in = {};
+        build_inputs(&snap, now_ms, &in);
+        log_liveness(&in, now_ms);
+
+        uint32_t prev_seq    = policy.last_oxim_seq;
+        int      prev_streak = policy.vitals_streak;
+        alert_decision_t decision = alert_policy_eval(&policy, &in, now_ms);
+        uint32_t raised = alert_decision_mask(&decision);
+
+        /* Observability: one line per out-of-range window that extends the
+         * streak. */
+        if ((policy.last_oxim_seq != prev_seq) &&
+            (policy.vitals_streak > prev_streak)) {
+            ESP_LOGW(TAG, "vitals window out of range: hr=%d bpm spo2=%.1f%% "
+                          "(streak %d/%d)",
+                     snap.heart_rate, (double)snap.spo2,
+                     policy.vitals_streak, VITALS_SUSTAIN_WINDOWS);
+        }
 
         /* ---- Collision: bypass WARNING, jump straight to ALERT. ------- */
         if (collision) {
@@ -144,62 +201,16 @@ void monitor_task(void * /*arg*/)
             ESP_LOGW(TAG, "collision detected - escalating directly to ALERT "
                          "(WARNING skipped)");
             /* Fall through: the ALERT case handles buzzer + SMS. */
-        } else if (!collision_alert_active) {
-            /* ---- Normal fall/vitals check (skipped during a collision ALERT). -- */
-            float roll_deg      = snap.ypr[2] * 180.0f / (float)M_PI;
-            bool  stopped       = (snap.speed < SPEED_STOPPED);
-
-            /* Thresholds are per-user: stored baseline ± fixed deltas.
-             * A below-minimum reading means the probe is off the body,
-             * not real hypothermia - suppress the temp channel. */
-            bool temp_valid = snap.temp_baseline_valid &&
-                              (snap.temp_c >= TEMP_BASELINE_DEFAULT);
-            float temp_low  = snap.temp_baseline - TEMP_HYPO_DELTA;
-            float temp_high = snap.temp_baseline + TEMP_HYPER_DELTA;
-            bool  temp_abnormal  = temp_valid &&
-                                   (snap.temp_c < temp_low || snap.temp_c > temp_high);
-
-            /* ---- Heart rate / SpO2 (debounced per window) ----------------
-             * Only VALID windows count: invalid or normal data resets
-             * the streak; spo2==0 on a valid window = estimator noise. */
-            if (snap.oxim_seq != last_oxim_seq) {
-                last_oxim_seq = snap.oxim_seq;
-                bool bad_window = false;
-                if (snap.spo2_valid) {
-                    if (snap.heart_rate < HR_LOW_THRESHOLD ||
-                        snap.heart_rate > HR_HIGH_THRESHOLD) {
-                        bad_window = true;
-                    }
-                    if (snap.spo2 >= 70.0f && snap.spo2 < SPO2_LOW_THRESHOLD) {
-                        bad_window = true;
-                    }
-                }
-                vitals_streak = bad_window ? (vitals_streak + 1) : 0;
-                if (bad_window) {
-                    ESP_LOGW(TAG, "vitals window out of range: hr=%d bpm "
-                                 "spo2=%.1f%% (streak %d/%d)",
-                             snap.heart_rate, (double)snap.spo2,
-                             vitals_streak, VITALS_SUSTAIN_WINDOWS);
-                }
+        } else if (!collision_alert_active &&
+                   (!decision.any || alert_delivery_busy())) {
+            /* Nothing raising, or the previous alert is still being delivered:
+             * settle back to NORMAL. A collision ALERT is sticky and skips this
+             * check. */
+            if (state != NORMAL) {
+                gpio_set_level(PIN_BUZZER, 0);
+                state = NORMAL;
             }
-            bool vitals_abnormal = (vitals_streak >= VITALS_SUSTAIN_WINDOWS);
-
-            bool  fallen        = (fabsf(roll_deg) >= FALL_ANGLE_THRESHOLD);
-            bool  alert_condition = fallen || temp_abnormal || vitals_abnormal;
-            /* Cooldowns: stay in NORMAL while one is active; collision
-             * edges bypass them. */
-            bool  in_cooldown     = (now_ms < abort_cooldown_until) ||
-                                    (now_ms < sms_cooldown_until);
-
-            /* If we're moving, the condition cleared, or we're in the
-             * post-abort cooldown, return to / stay in NORMAL. */
-            if (!stopped || !alert_condition || in_cooldown) {
-                if (state != NORMAL) {
-                    gpio_set_level(PIN_BUZZER, 0);
-                    state = NORMAL;
-                }
-                continue;
-            }
+            continue;
         }
 
         switch (state) {
@@ -212,7 +223,8 @@ void monitor_task(void * /*arg*/)
                 if (now_ms - state_start_ms >= WARNING_MS) {
                     state          = ALERT;
                     state_start_ms = now_ms;
-                    ESP_LOGW(TAG, "vitals warning escalated to ALERT");
+                    ESP_LOGW(TAG, "warning escalated to ALERT (%s)",
+                             alert_reason_text(raised, false));
                 }
                 break;
 
@@ -220,13 +232,15 @@ void monitor_task(void * /*arg*/)
                 /* Pulse the buzzer at BUZZER_PERIOD_MS. */
                 gpio_set_level(PIN_BUZZER, (now_ms / BUZZER_PERIOD_MS) % 2);
                 if (now_ms - state_start_ms >= ALERT_MS) {
+                    const char *reason =
+                        alert_reason_text(raised, collision_alert_active);
                     gpio_set_level(PIN_BUZZER, 0);
-                    ESP_LOGW(TAG, "ALERT window expired; sending SMS "
-                                 "(collision=%d)", collision_alert_active ? 1 : 0);
-                    send_alert_sms(&snap, collision_alert_active);
-                    /* Re-page limiter: ~10 s of WARNING+ALERT buzzer
-                     * before each re-page. */
-                    sms_cooldown_until = now_ms + SMS_REPAGE_COOLDOWN_MS;
+                    ESP_LOGW(TAG, "ALERT window expired; queueing SMS (%s)", reason);
+                    /* The delivery task owns the UART and retries; this never
+                     * blocks. */
+                    if (!alert_delivery_enqueue(raised, collision_alert_active)) {
+                        ESP_LOGE(TAG, "ALERT NOT QUEUED (delivery unavailable)");
+                    }
                     state                  = NORMAL;
                     collision_alert_active = false;
                 }

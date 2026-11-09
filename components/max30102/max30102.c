@@ -122,9 +122,12 @@ esp_err_t max30102_read_fifo(i2c_master_dev_handle_t dev, int32_t *red, int32_t 
 
 esp_err_t max30102_read_fifo_burst(i2c_master_dev_handle_t dev,
                                    int32_t *red_out, int32_t *ir_out,
-                                   size_t max_samples, size_t *out_count)
+                                   size_t max_samples,
+                                   uint8_t *raw_buf, size_t raw_buf_len,
+                                   size_t *out_count)
 {
-    if (red_out == NULL || ir_out == NULL || out_count == NULL) {
+    if (red_out == NULL || ir_out == NULL || out_count == NULL ||
+        raw_buf == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     if (max_samples == 0) {
@@ -151,22 +154,23 @@ esp_err_t max30102_read_fifo_burst(i2c_master_dev_handle_t dev,
         return ESP_OK;
     }
 
-    /* One transaction: write REG_FIFO_DATA, read n*6 bytes (the FIFO
-     * read pointer auto-increments). */
+    /* One transaction: REG_FIFO_DATA then n*6 bytes (the pointer
+     * auto-increments). Caller-owned scratch, so no allocation on this hot
+     * path. */
     size_t byte_count = n * 6;
-    uint8_t *buf = (uint8_t *)malloc(byte_count);
-    if (buf == NULL) return ESP_ERR_NO_MEM;
+    if (byte_count > raw_buf_len) {
+        return ESP_ERR_INVALID_SIZE;
+    }
 
     uint8_t reg = REG_FIFO_DATA;
-    err = i2c_master_transmit_receive(dev, &reg, 1, buf, byte_count,
+    err = i2c_master_transmit_receive(dev, &reg, 1, raw_buf, byte_count,
                                       pdMS_TO_TICKS(1000));
     if (err != ESP_OK) {
-        free(buf);
         return err;
     }
 
     for (size_t i = 0; i < n; ++i) {
-        const uint8_t *s = buf + i * 6;
+        const uint8_t *s = raw_buf + i * 6;
         red_out[i] = ((int32_t)(s[0] & 0x03) << 16) |
                      ((int32_t)s[1] << 8) |
                       (int32_t)s[2];
@@ -174,7 +178,6 @@ esp_err_t max30102_read_fifo_burst(i2c_master_dev_handle_t dev,
                      ((int32_t)s[4] << 8) |
                       (int32_t)s[5];
     }
-    free(buf);
     *out_count = n;
     return ESP_OK;
 }

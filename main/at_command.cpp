@@ -3,7 +3,6 @@
  */
 #include "at_command.h"
 
-#include <cstdio>
 #include <cstring>
 
 #include "freertos/FreeRTOS.h"
@@ -18,8 +17,11 @@
 static const char *TAG = "axion.modem";
 
 static SemaphoreHandle_t s_uart_mutex   = nullptr;
-static char              *s_resp_buf    = nullptr;
-static size_t             s_resp_buf_sz = 0;
+/* Static staging buffer: the AT layer is the only reader/writer and the
+ * mutex serialises access. No allocation, no null checks, no leak on an error
+ * path. */
+static char               s_resp_buf[UART_BUF_SIZE];
+static bool               s_uart_installed = false;
 
 static bool take_mutex(TickType_t ticks)
 {
@@ -33,12 +35,9 @@ static void give_mutex(void)
 
 esp_err_t at_modem_init(void)
 {
+    s_uart_installed = false;
     if (s_uart_mutex == nullptr) {
         s_uart_mutex = xSemaphoreCreateMutex();
-    }
-    if (s_resp_buf == nullptr) {
-        s_resp_buf_sz = UART_BUF_SIZE;
-        s_resp_buf    = new char[s_resp_buf_sz];
     }
 
     uart_config_t uart_config = {};
@@ -65,7 +64,13 @@ esp_err_t at_modem_init(void)
     ESP_LOGI(TAG, "UART%d @ %u baud ready (TX=%d RX=%d RTS=%d CTS=%d)",
              UART_MODEM_PORT, UART_MODEM_BAUD,
              PIN_UART_TX, PIN_UART_RX, PIN_UART_RTS, PIN_UART_CTS);
+    s_uart_installed = true;
     return ESP_OK;
+}
+
+bool at_modem_uart_ready(void)
+{
+    return s_uart_installed;
 }
 
 void at_modem_flush_rx(void)
@@ -75,43 +80,48 @@ void at_modem_flush_rx(void)
     give_mutex();
 }
 
-size_t at_command_last_response(char *out, size_t out_size)
+/* Core of the AT layer; the caller holds the UART mutex. The payload is copied
+ * out here so no separate accessor is needed. */
+static bool send_locked(const char *cmd, int max_timeout_ms,
+                        const char *expected_response,
+                        char *resp_out, size_t resp_out_size)
 {
-    if (out == nullptr || out_size == 0) return 0;
-    /* Read-only access; the only writer is at_command_send(), which
-     * callers run immediately before this. */
-    size_t copy_len = strlen(s_resp_buf ? s_resp_buf : "");
-    if (copy_len >= out_size) copy_len = out_size - 1;
-    memcpy(out, s_resp_buf ? s_resp_buf : "", copy_len);
-    out[copy_len] = '\0';
-    return copy_len;
-}
-
-bool at_command_send(const char *cmd, int max_timeout_ms, const char *expected_response)
-{
-    if (cmd == nullptr) return false;
-    if (!take_mutex(pdMS_TO_TICKS(2000))) {
-        ESP_LOGW(TAG, "UART mutex timeout on cmd: %s", cmd);
-        return false;
-    }
-
     /* Flush RX + clear the buffer so stale bytes can't false-match. */
     uart_flush_input(UART_MODEM_PORT);
-    if (s_resp_buf && s_resp_buf_sz > 0) s_resp_buf[0] = '\0';
+    s_resp_buf[0] = '\0';
 
-    char cmd_buf[80];
-    int  cmd_len = snprintf(cmd_buf, sizeof(cmd_buf), "%s\r", cmd);
-    uart_write_bytes(UART_MODEM_PORT, cmd_buf, cmd_len);
+    /* Command + CR written separately: no fixed buffer, no truncated length
+     *. */
+    uart_write_bytes(UART_MODEM_PORT, cmd, strlen(cmd));
+    uart_write_bytes(UART_MODEM_PORT, "\r", 1);
+
+    const size_t expected_len =
+        (expected_response != nullptr) ? strlen(expected_response) : 0;
 
     int     len            = 0;
-    bool    empty_expected = (expected_response == nullptr || expected_response[0] == '\0');
+    bool    empty_expected = (expected_len == 0);
     bool    response_found = false;
     int64_t start_ms       = esp_timer_get_time() / 1000;
 
     while ((esp_timer_get_time() / 1000) - start_ms < max_timeout_ms) {
+        /* Full buffer: keep the tail (still matches across the fold) and keep
+         * reading. */
+        if (len >= (int)sizeof(s_resp_buf) - 1) {
+            size_t keep = 0;
+            if (expected_len > 1 && expected_len < sizeof(s_resp_buf)) {
+                keep = expected_len - 1;
+            }
+            if (keep > (size_t)len) {
+                keep = (size_t)len;
+            }
+            memmove(s_resp_buf, s_resp_buf + len - keep, keep);
+            len = (int)keep;
+            s_resp_buf[len] = '\0';
+        }
+
         int read_len = uart_read_bytes(UART_MODEM_PORT,
                                        reinterpret_cast<uint8_t *>(s_resp_buf) + len,
-                                       s_resp_buf_sz - len - 1,
+                                       sizeof(s_resp_buf) - len - 1,
                                        pdMS_TO_TICKS(100));
         if (read_len > 0) {
             len += read_len;
@@ -125,20 +135,53 @@ bool at_command_send(const char *cmd, int max_timeout_ms, const char *expected_r
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    give_mutex();
+    if (resp_out != nullptr && resp_out_size > 0) {
+        size_t copy_len = strlen(s_resp_buf);
+        if (copy_len >= resp_out_size) copy_len = resp_out_size - 1;
+        memcpy(resp_out, s_resp_buf, copy_len);
+        resp_out[copy_len] = '\0';
+    }
+
     return response_found;
+}
+
+bool at_command_send_ex(const char *cmd, int max_timeout_ms,
+                        const char *expected_response,
+                        char *resp_out, size_t resp_out_size)
+{
+    if (cmd == nullptr) return false;
+    if (!take_mutex(pdMS_TO_TICKS(2000))) {
+        ESP_LOGW(TAG, "UART mutex timeout on cmd: %s", cmd);
+        return false;
+    }
+
+    const bool ok = send_locked(cmd, max_timeout_ms, expected_response,
+                                resp_out, resp_out_size);
+
+    give_mutex();
+    return ok;
+}
+
+bool at_command_send(const char *cmd, int max_timeout_ms, const char *expected_response)
+{
+    return at_command_send_ex(cmd, max_timeout_ms, expected_response, nullptr, 0);
 }
 
 bool at_command_send_sms_body(const char *phone, const char *body)
 {
     if (phone == nullptr || body == nullptr) return false;
-    if (!take_mutex(pdMS_TO_TICKS(2000))) return false;
+    /* Alerts come from their own task now, so waiting out a GNSS poll is fine;
+     * do not give up after 2 s and lose the alert. */
+    if (!take_mutex(pdMS_TO_TICKS(15000))) return false;
 
-    /* Issue the CMGS header. The modem answers with a `>` prompt. */
-    char header[64];
-    int  header_len = snprintf(header, sizeof(header), "AT+CMGS=\"%s\"\r", phone);
+    /* Issue the CMGS header. The modem answers with a `>` prompt. Written in
+     * three parts so a long number cannot truncate the CR. */
+    static const char k_cmgs_prefix[] = "AT+CMGS=\"";
+    static const char k_cmgs_suffix[] = "\"\r";
     uart_flush_input(UART_MODEM_PORT);
-    uart_write_bytes(UART_MODEM_PORT, header, header_len);
+    uart_write_bytes(UART_MODEM_PORT, k_cmgs_prefix, sizeof(k_cmgs_prefix) - 1);
+    uart_write_bytes(UART_MODEM_PORT, phone, strlen(phone));
+    uart_write_bytes(UART_MODEM_PORT, k_cmgs_suffix, sizeof(k_cmgs_suffix) - 1);
 
     bool    got_prompt = false;
     int     len        = 0;
@@ -146,7 +189,7 @@ bool at_command_send_sms_body(const char *phone, const char *body)
     while ((esp_timer_get_time() / 1000) - start_ms < 3000) {
         int read_len = uart_read_bytes(UART_MODEM_PORT,
                                        reinterpret_cast<uint8_t *>(s_resp_buf) + len,
-                                       s_resp_buf_sz - len - 1,
+                                       sizeof(s_resp_buf) - len - 1,
                                        pdMS_TO_TICKS(100));
         if (read_len > 0) {
             len += read_len;
@@ -169,7 +212,7 @@ bool at_command_send_sms_body(const char *phone, const char *body)
         while ((esp_timer_get_time() / 1000) - start_ms < 10000) {
             int read_len = uart_read_bytes(UART_MODEM_PORT,
                                            reinterpret_cast<uint8_t *>(s_resp_buf) + len,
-                                           s_resp_buf_sz - len - 1,
+                                           sizeof(s_resp_buf) - len - 1,
                                            pdMS_TO_TICKS(100));
             if (read_len > 0) {
                 len += read_len;
@@ -180,7 +223,12 @@ bool at_command_send_sms_body(const char *phone, const char *body)
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     } else {
-        ESP_LOGW(TAG, "no '>' prompt for SMS to %s", phone);
+        /* No prompt: the modem may still wait for the body, so cancel with
+         * ESC. */
+        ESP_LOGW(TAG, "no '>' prompt for SMS to %s - cancelling with ESC", phone);
+        const char esc = 0x1B;
+        uart_write_bytes(UART_MODEM_PORT, &esc, 1);
+        vTaskDelay(pdMS_TO_TICKS(200));   /* let the modem absorb the cancel */
     }
 
     give_mutex();

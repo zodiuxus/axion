@@ -6,17 +6,24 @@ idf_component_register(
         "mpu.cpp"
         "modem.cpp"
         "temperature.cpp"
+        "alert_policy.cpp"
+        "alert_message.cpp"
+        "alert_delivery.cpp"
         "monitor.cpp"
         "console.cpp"
         "max30102_task.cpp"
         "calibration_store.cpp"
+        "diagnostics.cpp"
         "status_led.cpp"
         "alert_button.cpp"
         "collision.cpp"
     INCLUDE_DIRS
         "."
     REQUIRES
-        driver
+        esp_driver_gpio
+        esp_driver_uart
+        esp_driver_i2c
+        esp_timer
         nvs_flash
         max30102
         I2Cdev

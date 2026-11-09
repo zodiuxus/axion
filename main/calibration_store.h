@@ -2,12 +2,9 @@
 /**
  * calibration_store.h - NVS-backed persistent calibration state.
  *
- * Flags: a uint32 bitfield in namespace "axion", key "cal_flags".
- *   bit 0  CAL_FLAG_FIRST_RUN          needs calibration on next boot
- *   bit 1  CAL_FLAG_TEMP_BASELINE_VALID temp baseline stored
- *   bit 2  CAL_FLAG_MPU_OFFSETS_VALID  MPU offsets stored
- * Other values (baseline float, MPU offsets blob, carrier/APN strings)
- * live under their own keys; missing keys return ESP_ERR_NVS_NOT_FOUND.
+ * Flags: uint32 bitfield, namespace "axion", key "cal_flags". Baseline,
+ * offsets and modem strings live under their own keys; a missing key is
+ * ESP_ERR_NVS_NOT_FOUND.
  */
 #ifndef AXION_CALIBRATION_STORE_H
 #define AXION_CALIBRATION_STORE_H
@@ -33,9 +30,6 @@ typedef enum {
 /** Initialize NVS and load the cached flags. Call once from app_main
  *  before any other calibration_store function. */
 esp_err_t calibration_store_init(void);
-
-/** Read all flags as a uint32 (the raw hex value). */
-uint32_t calibration_store_get_flags(void);
 
 /** Check if a specific flag is set. */
 bool calibration_store_is_flag_set(uint32_t flag);

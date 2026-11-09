@@ -132,14 +132,17 @@ esp_err_t max30102_read_fifo(i2c_master_dev_handle_t dev, int32_t *red, int32_t 
 
 /** Burst-read up to `max_samples` FIFO samples in one I2C transaction
  *  (preferred FIFO_A_FULL drain: ~6x less bus traffic than 1-at-a-time).
+ *  `raw_buf` is caller-provided scratch of at least `max_samples * 6` bytes;
+ *  the driver allocates nothing (this path runs for the life of the device).
  *  `*out_count` = number of samples actually read. */
 esp_err_t max30102_read_fifo_burst(i2c_master_dev_handle_t dev,
                                    int32_t *red_out, int32_t *ir_out,
-                                   size_t max_samples, size_t *out_count);
+                                   size_t max_samples,
+                                   uint8_t *raw_buf, size_t raw_buf_len,
+                                   size_t *out_count);
 
-/** Enable / disable the FIFO_A_FULL interrupt (fires when the FIFO is
- *  ~75% full, i.e. 17 unread samples). The INT pin is open-drain and
- *  active-low; the caller is responsible for wiring the GPIO ISR. */
+/** Enable / disable the FIFO_A_FULL interrupt. The default config sets
+ *  FIFO_CONFIG[7:4] = 0, so it fires with 32 unread samples. */
 esp_err_t max30102_enable_fifo_a_full_int(i2c_master_dev_handle_t dev, bool enable);
 
 /** Read both interrupt status registers (REG_INTR_STATUS_1/2) and
