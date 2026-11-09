@@ -1,20 +1,12 @@
 /**
  * mpu.cpp - MPU6050 setup + interrupt-driven DMP/collision task.
  *
- * Offset persistence: the PID calibration runs only on the first boot
- * (or after factory reset / re-mounting); the six raw offset register
- * values are stored in NVS ("mpu_offs") and rewritten on later boots -
- * no "keep still" requirement, and setup is ~1-2 s faster.
+ * Offsets are calibrated once and persisted in NVS. Calibration runs at ±2g
+ * (CalibrateAccel hardcodes 16384 LSB/g); the runtime range is ±4g and the
+ * stored offsets are rescaled on apply (sensor_math.h).
  *
- * ALWAYS calibrate the accel at ±2g: i2cdevlib's CalibrateAccel() PID
- * has the gravity-removal constant (16384) hardcoded for that range.
- * If switching FSR to ±4g, do it AFTER applying offsets. The g-scale
- * constant is derived from the live AFS_SEL register at runtime.
- *
- * Collision escalation is gated on the system armed flag (state.h).
- * The data-ready INT (200 Hz) drives both the raw-accel collision check
- * and the DMP FIFO drain from this single task (one INT pin, and a
- * second bus consumer would only race the FIFO read).
+ * One INT pin, one task: the data-ready interrupt drives both the collision
+ * check and the DMP FIFO drain.
  */
 #include "mpu.h"
 
@@ -32,6 +24,7 @@
 #include "config.h"
 #include "state.h"
 #include "collision.h"
+#include "sensor_math.h"
 #include "calibration_store.h"
 
 static const char *TAG = "axion.mpu";
@@ -73,6 +66,10 @@ void i2c_bus_setup(void)
     }
     ESP_LOGI(TAG, "I2C bus ready (SDA=%d SCL=%d %u Hz)",
              PIN_I2C_SDA, PIN_I2C_SCL, I2C_MASTER_FREQ_HZ);
+    /* The bus exists now, independently of whether any device on it answers.
+     * Publish that fact so bus consumers do not have to wait on the MPU
+     * initialiser. */
+    axion_state_set_ready(BIT_I2C_READY);
 
     /* Probe both slave addresses up front. If a chip doesn't ACK here,
     * every subsequent transaction would fail anyway - one clear wiring
@@ -94,28 +91,38 @@ void i2c_bus_setup(void)
 void mpu_setup(void)
 {
     s_mpu.initialize();
-    s_mpu.dmpInitialize();
 
-    /* dmpInitialize() resets the device: ACCEL_CONFIG is back at ±2g
-     * and the offset registers are zero - offsets are (re)applied below.
-     * Calibrate EXPLICITLY at ±2g (see file header); switch to ±4g only
-     * AFTER applying the offsets. */
+    /* Fail fast: WHO_AM_I before the DMP firmware load. */
+    if (!s_mpu.testConnection()) {
+        ESP_LOGE(TAG, "MPU6050 connection failed (WHO_AM_I)");
+        vTaskDelete(nullptr);
+        return;
+    }
+    ESP_LOGI(TAG, "MPU6050 connected");
+
+    /* DMP = fused orientation for falls; collision needs only raw accel, so a
+     * DMP failure degrades instead of hanging. */
+    const uint8_t dmp_status = s_mpu.dmpInitialize();
+    const bool    dmp_ok     = (dmp_status == 0);
+    if (!dmp_ok) {
+        /* No DMP, no FIFO: only the data-ready interrupt stays active. */
+        s_mpu.setDMPEnabled(false);
+        s_mpu.setFIFOEnabled(false);
+        s_mpu.resetFIFO();
+        ESP_LOGE(TAG, "DMP init failed (status %u): fall detection unavailable, "
+                      "raw-accel collision detection continues", dmp_status);
+    }
+
+    /* dmpInitialize() resets ACCEL_CONFIG and the offsets; both are reapplied
+     * below. */
     s_mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);
 
     /* ---- Calibrate once, then persist to NVS --------------------------- */
-    /* Run the PID loop once, save the six raw offset register values as
-     * an NVS blob ("mpu_offs"), and just rewrite them on every later boot.
-     * Accel offsets are orientation-dependent (gravity baked in):
-     * factory reset or re-mounting must invalidate them. */
+    /* Stored offsets are in the ±2g domain (rescaled at runtime); a factory
+     * reset or re-mounting must invalidate them. */
     int16_t offs[6] = {0};
     if (calibration_store_is_flag_set(CAL_FLAG_MPU_OFFSETS_VALID) &&
         calibration_store_get_mpu_offsets(offs) == ESP_OK) {
-        s_mpu.setXAccelOffset(offs[0]);
-        s_mpu.setYAccelOffset(offs[1]);
-        s_mpu.setZAccelOffset(offs[2]);
-        s_mpu.setXGyroOffset(offs[3]);
-        s_mpu.setYGyroOffset(offs[4]);
-        s_mpu.setZGyroOffset(offs[5]);
         ESP_LOGI(TAG, "MPU offsets restored from NVS (accel %d/%d/%d, "
                       "gyro %d/%d/%d) - skipping calibration",
                  offs[0], offs[1], offs[2],
@@ -148,30 +155,40 @@ void mpu_setup(void)
     /* Re-apply to keep MPU_SAMPLE_RATE_DIV the single source of truth. */
     s_mpu.setRate(MPU_SAMPLE_RATE_DIV);
 
+    /* ±4g keeps the 2 g collision threshold clear of clipping. The DMP fusion
+     * normalises the accel vector; confirm YPR at rest on the bench. */
+    s_mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_4);
+
+    const uint8_t afs = s_mpu.getFullScaleAccelRange();
+    /* Accel offsets are applied in the runtime range's units; gyro offsets
+     * are independent of the accelerometer range. */
+    s_mpu.setXAccelOffset(accel_offset_for_fs(offs[0], afs));
+    s_mpu.setYAccelOffset(accel_offset_for_fs(offs[1], afs));
+    s_mpu.setZAccelOffset(accel_offset_for_fs(offs[2], afs));
+    s_mpu.setXGyroOffset(offs[3]);
+    s_mpu.setYGyroOffset(offs[4]);
+    s_mpu.setZGyroOffset(offs[5]);
+
     /* Derive the g-scale from the live register so a future FSR change
      * cannot silently corrupt the conversion. */
-    uint8_t afs = s_mpu.getFullScaleAccelRange();
     s_lsb_per_g = 65536.0f / (float)(4u << afs);
-    if (afs != (uint8_t)MPU6050_ACCEL_FS_2) {
-        ESP_LOGW(TAG, "AFS_SEL=%u (expected 0 = ±2g) - sensitivity %.0f LSB/g",
+    if (afs != (uint8_t)MPU6050_ACCEL_FS_4) {
+        ESP_LOGW(TAG, "AFS_SEL=%u (expected 1 = ±4g) - sensitivity %.0f LSB/g",
                  afs, (double)s_lsb_per_g);
     }
     ESP_LOGI(TAG, "accel ±%ug, %.0f LSB/g, sample rate %u Hz",
              2 << afs, (double)s_lsb_per_g, 1000 / (1 + MPU_SAMPLE_RATE_DIV));
 
-    if (!s_mpu.testConnection()) {
-        ESP_LOGE(TAG, "MPU6050 connection failed");
-        vTaskDelete(nullptr);
-        return;
+    if (dmp_ok) {
+        s_mpu.setDMPEnabled(true);
+        s_packet_size = s_mpu.dmpGetFIFOPacketSize();
+        ESP_LOGI(TAG, "DMP started, packet size = %u", s_packet_size);
+    } else {
+        ESP_LOGW(TAG, "MPU running degraded: collision only, no orientation");
     }
-    ESP_LOGI(TAG, "MPU6050 connected");
-
-    s_mpu.setDMPEnabled(true);
-    s_packet_size = s_mpu.dmpGetFIFOPacketSize();
-    ESP_LOGI(TAG, "DMP started, packet size = %u", s_packet_size);
 
     /* DATA_RDY_EN: pulse the INT pin on every new sample (drives the
-     * collision check). */
+     * collision check). Needed whether or not the DMP is running. */
     s_mpu.setIntDataReadyEnabled(true);
     /* Clear latched status before hooking up the GPIO. */
     (void)s_mpu.getIntStatus();
@@ -214,10 +231,22 @@ void mpu_int_task(void * /*arg*/)
     VectorFloat   gravity;
     float         ypr[3];
     int64_t       last_collision_ms = 0;
+    uint32_t      missed_windows    = 0;
 
     while (true) {
-        /* Block until notified; pdTRUE collapses back-to-back INTs. */
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        /* Bounded wait: a stalled INT/DMP must be visible, not park the task
+         *. */
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(MPU_ALIVE_TIMEOUT_MS)) == 0) {
+            ++missed_windows;
+            if (missed_windows == 1u || (missed_windows % 20u) == 0u) {
+                ESP_LOGW(TAG, "no MPU interrupt for %u ms (%lu window(s)) - "
+                              "INT line or DMP stalled; orientation data stale",
+                         (unsigned)MPU_ALIVE_TIMEOUT_MS,
+                         (unsigned long)missed_windows);
+            }
+            continue;
+        }
+        missed_windows = 0;
 
         /* 1) Read INT_STATUS - clears latched bits on the MPU6050. */
         uint8_t int_status = s_mpu.getIntStatus();
@@ -284,18 +313,3 @@ void mpu_int_task(void * /*arg*/)
     }
 }
 
-bool mpu_get_raw_accel_g(float *ax, float *ay, float *az)
-{
-    /* Returns false if called before BIT_MPU_READY is set. */
-    if ((xEventGroupGetBits(g_sensors_ready) & BIT_MPU_READY) == 0) {
-        return false;
-    }
-
-    int16_t rx = 0, ry = 0, rz = 0;
-    s_mpu.getAcceleration(&rx, &ry, &rz);
-
-    if (ax) *ax = (float)rx / s_lsb_per_g;
-    if (ay) *ay = (float)ry / s_lsb_per_g;
-    if (az) *az = (float)rz / s_lsb_per_g;
-    return true;
-}

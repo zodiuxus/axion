@@ -327,7 +327,8 @@ owb_status owb_set_strong_pullup(const OneWireBus * bus, bool enable);
 
 
 #include "owb_gpio.h"
-#include "owb_rmt.h"
+/* owb_rmt.h is not included: the RMT driver variant depends on driver/rmt.h,
+ * removed in ESP-IDF 6.x. Use owb_gpio for the bit-bang driver. */
 
 #ifdef __cplusplus
 }

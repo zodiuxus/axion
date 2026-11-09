@@ -71,7 +71,8 @@ void status_led_task(void * /*arg*/)
                                                    LED_CALIB_ON_MS, LED_CALIB_OFF_MS,
                                                    deadline);
         if (!ok) {
-            ESP_LOGW(TAG, "calibration timeout; proceeding to complete anyway");
+            ESP_LOGW(TAG, "calibration timeout - the first-run flag is kept "
+                          "unless the calibration actually completed");
         }
     } else {
         /* ---- BOOTING: fast blink until all sensors calibrated (no cal phase) ---- */
@@ -84,11 +85,28 @@ void status_led_task(void * /*arg*/)
     }
 
     /* ---- COMPLETE: solid 2 s glow, then off ---- */
-    /* Clear FIRST_RUN only here so a reboot during any calibration
-     * re-runs all of them. */
+    /* Commit only when the result exists: both calibrated bits AND a baseline
+     * (or no temperature sensor). Otherwise FIRST_RUN survives and the next
+     * boot retries. */
     if (first_run) {
-        calibration_store_clear_flag(CAL_FLAG_FIRST_RUN);
-        ESP_LOGI(TAG, "first-run complete; flag cleared in NVS");
+        const EventBits_t bits = xEventGroupGetBits(g_sensors_ready);
+        const bool temp_absent = (bits & BIT_TEMP_SENSOR_ABSENT) != 0;
+        float baseline_c = 0.0f;
+        const bool baseline_stored =
+            (calibration_store_get_temp_baseline(&baseline_c) == ESP_OK);
+
+        if (all_calibrated() && (baseline_stored || temp_absent)) {
+            calibration_store_clear_flag(CAL_FLAG_FIRST_RUN);
+            ESP_LOGI(TAG, "first-run complete (baseline=%s); flag cleared in NVS",
+                     baseline_stored ? "stored" : "no sensor");
+        } else {
+            ESP_LOGE(TAG, "first run incomplete (temp_calib=%d oxim_calib=%d "
+                          "baseline=%d temp_absent=%d) - keeping FIRST_RUN so "
+                          "the next boot retries",
+                     (int)((bits & BIT_TEMP_CALIBRATED) != 0),
+                     (int)((bits & BIT_OXIM_CALIBRATED) != 0),
+                     (int)baseline_stored, (int)temp_absent);
+        }
     }
 
     ESP_LOGI(TAG, "calibration complete; solid glow");

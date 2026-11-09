@@ -17,28 +17,35 @@
 extern "C" {
 #endif
 
-/* Event-group bits in g_sensors_ready:
- *   0-4  READY       - level-triggered, set once init completes
- *   5-6  CALIBRATED  - level-triggered, set once calibration completes/skips
- *   7    ALERT_ABORT - edge-triggered, consumed by monitor (clear-on-exit)
- *   8    COLLISION   - edge-triggered, consumed by monitor (clear-on-exit) */
-#define BIT_AT_READY        (1 << 0)   /* A7670E modem ready (SMS available) */
-#define BIT_MPU_READY       (1 << 1)   /* MPU6050 DMP streaming */
-#define BIT_GNSS_READY      (1 << 2)   /* GNSS producing fixes (may be stale) */
+/* Event-group bits in g_sensors_ready. Level-triggered unless marked edge.
+ * The #define block below is the authoritative list - keep it in sync. */
+#define BIT_AT_READY        (1 << 0)   /* A7670E registered: SMS path usable */
+#define BIT_MPU_READY       (1 << 1)   /* MPU initialised (DMP or collision-only) */
+#define BIT_GNSS_READY      (1 << 2)   /* GNSS commands sent (not "has fixes") */
 #define BIT_TEMP_READY      (1 << 3)   /* DS18B20 producing readings */
 #define BIT_MAX30102_READY  (1 << 4)   /* MAX30102 initialized */
-
-#define BIT_TEMP_CALIBRATED (1 << 5)   /* temp phase complete (gates monitor arming) */
-#define BIT_OXIM_CALIBRATED (1 << 6)   /* MAX30102 calibration phase complete */
-
-#define BIT_ALERT_ABORT     (1 << 7)   /* Alert-abort button pressed (edge) */
-
-#define BIT_COLLISION_DETECTED (1 << 8) /* Raw-accel collision detected (edge) */
-#define BIT_TEMP_MIN_REACHED (1 << 9)
+#define BIT_TEMP_CALIBRATED (1 << 5)   /* temp calibration complete; gates the
+                                        * first-run commit, not alerting */
+#define BIT_OXIM_CALIBRATED (1 << 6)   /* first oximetry window analysed */
+#define BIT_ALERT_ABORT     (1 << 7)   /* button pressed (edge, clear-on-exit) */
+#define BIT_COLLISION_DETECTED (1 << 8) /* raw-accel collision (edge, clear-on-exit) */
+#define BIT_TEMP_MIN_REACHED (1 << 9)  /* probe in contact: a plausible reading
+                                        * has been seen (plausibility floor) */
+/* No DS18B20 on the bus at boot. Temperature calibration can never succeed in
+ * that case, so the calibration commit is allowed to proceed without a stored
+ * baseline. */
+#define BIT_TEMP_SENSOR_ABSENT (1 << 10)
+/* Shared I2C0 bus installed (i2c_bus_setup). Set by the bus owner, not by the
+ * MPU initialiser: a sensor on that bus must not depend on an unrelated device
+ *. */
+#define BIT_I2C_READY       (1 << 11)
 
 typedef struct {
     /* Orientation (MPU6050 DMP). yaw, pitch, roll in radians. */
     float ypr[3];
+    /* ms timestamp of the last ypr update (esp_timer, 0 = never). Consumers
+     * must treat data older than YPR_STALE_MS as unknown. */
+    int64_t ypr_ms;
 
     /* Position / motion (GNSS). lat/lon/alt/speed hold the LAST VALID fix
      * and are only overwritten when a new fix is acquired. */
@@ -51,6 +58,7 @@ typedef struct {
 
     /* Body temperature (DS18B20). */
     float temp_c;
+    int64_t temp_ms;      /* ms timestamp of the last temp_c update; 0 = never */
     float temp_baseline;   /* calibrated normal body temp (°C) */
     bool temp_baseline_valid; /* false until a calibrated baseline exists;
                                 * while false the monitor ignores the temp */
@@ -62,6 +70,7 @@ typedef struct {
     uint32_t oxim_seq;  /* bumped on EVERY completed analysis window
                          * (valid or not) - lets the 100 ms monitor poll
                          * count 5.12 s windows exactly once each */
+    int64_t  oxim_ms;   /* ms timestamp of the last completed window; 0 = never */
 
 } axion_state_t;
 
@@ -71,15 +80,16 @@ void axion_state_init(void);
 /* Block until all of the given ready-bits are set. */
 void axion_state_wait_all(uint32_t bits);
 
-/* Block until any of the given ready-bits are set. */
-void axion_state_wait_any(uint32_t bits);
+/* Block until all of the given bits are set, or the timeout elapses.
+ * @return true if every bit was set. */
+bool axion_state_wait_all_timeout(uint32_t bits, uint32_t timeout_ms);
 
 /* Set ready-bits (used by sensor init tasks). */
 void axion_state_set_ready(uint32_t bits);
 
 /* ---- System arming gate ---------------------------------------------- */
-/* Collision ESCALATION is suppressed until modem bring-up completes
- * (mpu_int_task checks this on every wake; set by modem_setup_task).
+/* Collision ESCALATION is suppressed until the monitor task starts
+ * (mpu_int_task checks this on every wake; set by monitor_task).
  * Lock-free atomic. */
 void axion_state_set_armed(bool armed);
 bool axion_state_is_armed(void);

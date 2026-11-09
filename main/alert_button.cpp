@@ -54,16 +54,31 @@ void alert_button_init(void)
     gpio_pullup_en(PIN_ALERT_BUTTON);   /* active-low */
 
     s_button_queue = xQueueCreate(8, sizeof(int64_t));
+    if (s_button_queue == nullptr) {
+        /* The ISR dereferences this queue; without it, the first press would
+         * crash the device. Disable the button instead. */
+        ESP_LOGE(TAG, "button queue allocation failed - abort button disabled");
+        return;
+    }
 
     /* ISR service is installed centrally in app_main; just attach. */
     esp_err_t isr_err = gpio_isr_handler_add(PIN_ALERT_BUTTON, button_isr, nullptr);
     if (isr_err != ESP_OK) {
-        ESP_LOGE(TAG, "gpio_isr_handler_add: %s", esp_err_to_name(isr_err));
+        ESP_LOGE(TAG, "gpio_isr_handler_add: %s - abort button disabled",
+                 esp_err_to_name(isr_err));
         return;
     }
     gpio_set_intr_type(PIN_ALERT_BUTTON, GPIO_INTR_NEGEDGE);
 
-    xTaskCreate(alert_button_task, "alert_btn", 2048, nullptr, 2, nullptr);
+    if (xTaskCreate(alert_button_task, "alert_btn", 2048, nullptr, 2,
+                    nullptr) != pdPASS) {
+        /* No consumer: stop generating events rather than filling the queue
+         * with timestamps nothing will ever read. */
+        ESP_LOGE(TAG, "debounce task creation failed - abort button disabled");
+        gpio_isr_handler_remove(PIN_ALERT_BUTTON);
+        return;
+    }
+
     ESP_LOGI(TAG, "alert-abort button on GPIO %d (active-low, %u ms debounce)",
              PIN_ALERT_BUTTON, BUTTON_DEBOUNCE_MS);
 }

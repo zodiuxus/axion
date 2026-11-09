@@ -1,12 +1,8 @@
 /**
  * max30102_task.cpp - Oximetry sampling + estimation task.
  *
- * The FIFO_A_FULL interrupt drives burst reads (a 250 ms poll fallback
- * covers a dead INT line - latency, not data loss). Each 128-sample
- * window (5.12 s at the effective 25 sps) yields one HR/SpO2 estimate.
- *
- * First run: 2-minute calibration window after the first valid
- * estimate. Later boots: BIT_OXIM_CALIBRATED set on the first window.
+ * FIFO_A_FULL drives burst reads (250 ms poll as fallback); each 128-sample
+ * window yields one HR/SpO2 estimate. No calibration phase.
  */
 
 #include "max30102_task.h"
@@ -18,7 +14,6 @@
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 
 #include "max30102.h"
 #include "max30102_algorithm.h"
@@ -26,7 +21,6 @@
 
 #include "config.h"
 #include "state.h"
-#include "calibration_store.h"
 
 static const char *TAG = "axion.max30102";
 
@@ -45,8 +39,14 @@ static void IRAM_ATTR max30102_int_isr(void * /*arg*/)
 void max30102_task(void * /*arg*/)
 {
     esp_log_level_set(TAG, ESP_LOG_DEBUG);
-    /* BIT_MPU_READY doubles as the I2C-bus-ready signal. */
-    axion_state_wait_all(BIT_MPU_READY);
+    /* Wait for the shared bus, not for the MPU: making oximetry depend on an
+     * unrelated sensor meant a dead MPU also killed this task. Bounded, so a dead bus does not leave the task blocked. */
+    if (!axion_state_wait_all_timeout(BIT_I2C_READY, I2C_READY_TIMEOUT_MS)) {
+        ESP_LOGE(TAG, "I2C bus never came up - oximetry unavailable");
+        axion_state_set_ready(BIT_OXIM_CALIBRATED);
+        vTaskDelete(nullptr);
+        return;
+    }
 
     /* Handle for our 0x57 device on the shared bus (cached by I2Cdev). */
     i2c_master_dev_handle_t max_dev = I2Cdev::deviceHandle(MAX30102_I2C_ADDR);
@@ -100,19 +100,10 @@ void max30102_task(void * /*arg*/)
     gpio_set_intr_type(PIN_MAX30102_INT, GPIO_INTR_NEGEDGE);
     ESP_LOGI(TAG, "MAX30102 INT on GPIO %d (FIFO_A_FULL)", PIN_MAX30102_INT);
 
-    /* ---- Calibration state ---- */
-    bool first_run   = calibration_store_is_flag_set(CAL_FLAG_FIRST_RUN);
-    bool calibrated  = !first_run;
+    /* Set once the first analysis window has completed, whether or not it was
+     * a valid estimate. There is no calibration phase to wait for: see the
+     * first-window block below. */
     bool first_window = true;
-    int64_t cal_start_ms = 0;
-    double  hr_sum   = 0.0;
-    double  spo2_sum = 0.0;
-    int     cal_count = 0;
-
-    if (first_run) {
-        ESP_LOGI(TAG, "first run: will calibrate for %u ms after first valid window",
-                 OXIM_CALIBRATION_MS);
-    }
 
     /* Accumulate burst reads; run the algorithm when the buffer fills. */
     int32_t ir_buf[MAX30102_BUFFER_SIZE];
@@ -122,6 +113,14 @@ void max30102_task(void * /*arg*/)
     /* Scratch buffers for the burst read. The FIFO is 32 deep. */
     int32_t red_burst[32];
     int32_t ir_burst[32];
+    /* Packed sample bytes; caller-owned so the driver allocates nothing
+     *. */
+    uint8_t raw_burst[32 * 6];
+
+    /* Overflow bookkeeping: the 128-sample window must be a
+     * contiguous 40 ms grid, so any lost sample invalidates it. */
+    uint8_t  last_ovf       = 0;
+    uint32_t overflow_events = 0;
 
     /* ~10 s of silent polls triggers the INT diagnostics below. */
     int silent_polls = 0;
@@ -137,10 +136,26 @@ void max30102_task(void * /*arg*/)
         /* Clear the interrupt (read-to-clear) so the INT pin deasserts. */
         max30102_read_int_status(max_dev, &s1, &s2);
 
+        /* Lost samples break the assumed 40 ms grid: restart the window. The
+         * previous-value comparison handles both counter semantics. */
+        uint8_t ovf = 0;
+        if (max30102_read_reg(max_dev, REG_OVF_COUNTER, &ovf, 1) == ESP_OK) {
+            if (ovf != 0 && ovf != last_ovf) {
+                ++overflow_events;
+                if (overflow_events == 1 || (overflow_events % 10u) == 0u) {
+                    ESP_LOGW(TAG, "FIFO overflow: %u sample(s) lost "
+                                  "(event %lu) - restarting analysis window",
+                             (unsigned)ovf, (unsigned long)overflow_events);
+                }
+                buf_idx = 0;
+            }
+            last_ovf = ovf;
+        }
+
         /* Burst-read whatever's in the FIFO (up to 32 samples). */
         size_t n = 0;
-        err = max30102_read_fifo_burst(max_dev,
-                                       red_burst, ir_burst, 32, &n);
+        err = max30102_read_fifo_burst(max_dev, red_burst, ir_burst, 32,
+                                       raw_burst, sizeof(raw_burst), &n);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "burst read failed: %s", esp_err_to_name(err));
             continue;
@@ -227,36 +242,18 @@ void max30102_task(void * /*arg*/)
                 ESP_LOGI(TAG, "first window: hr=%d bpm spo2=%.1f%% (corr=%.2f)",
                          hr, spo2, corr);
                 axion_state_set_ready(BIT_MAX30102_READY);
+                /* Nothing to calibrate: the SpO2 curve is a fixed,
+                 * uncalibrated approximation (README) and the estimator needs
+                 * no per-device offset. The old first-run phase averaged two
+                 * minutes of estimates and then discarded them, which only
+                 * delayed this bit and consumed half of the status LED's
+                 * budget. */
+                axion_state_set_ready(BIT_OXIM_CALIBRATED);
                 first_window = false;
-
-                if (first_run) {
-                    cal_start_ms = esp_timer_get_time() / 1000;
-                    ESP_LOGI(TAG, "calibration window started");
-                } else {
-                    axion_state_set_ready(BIT_OXIM_CALIBRATED);
-                    calibrated = true;
-                }
             } else {
                 ESP_LOGI(TAG, "win: hr=%d bpm spo2=%.1f%% corr=%.2f "
                               "pi=%.3f valid=%d",
                          hr, spo2, corr, perf_ix, valid ? 1 : 0);
-            }
-
-            /* Accumulate valid estimates during calibration. */
-            if (first_run && !calibrated && valid) {
-                hr_sum   += hr;
-                spo2_sum += spo2;
-                cal_count++;
-                int64_t elapsed = (esp_timer_get_time() / 1000) - cal_start_ms;
-                if (elapsed >= (int64_t)OXIM_CALIBRATION_MS) {
-                    double hr_avg   = (cal_count > 0) ? (hr_sum   / cal_count) : 0.0;
-                    double spo2_avg = (cal_count > 0) ? (spo2_sum / cal_count) : 0.0;
-                    ESP_LOGI(TAG, "calibration done: %d valid samples, "
-                             "hr_avg=%.1f bpm spo2_avg=%.1f%%",
-                             cal_count, hr_avg, spo2_avg);
-                    axion_state_set_ready(BIT_OXIM_CALIBRATED);
-                    calibrated = true;
-                }
             }
 
             /* Reset the buffer for the next window. */

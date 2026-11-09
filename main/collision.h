@@ -1,12 +1,9 @@
 #pragma once
 /**
- * collision.h - Raw-accelerometer collision detector (helper API).
+ * collision.h - Raw-accelerometer collision detector.
  *
- * Threshold + cooldown check called from mpu_int_task on every
- * data-ready interrupt (raw accel, not the DMP - the DMP filters out
- * exactly the transients a collision produces). A trigger makes the
- * caller set BIT_COLLISION_DETECTED; the monitor then escalates
- * straight to ALERT.
+ * Called from mpu_int_task per data-ready interrupt. A trigger sets
+ * BIT_COLLISION_DETECTED; the monitor escalates straight to ALERT.
  */
 #ifndef AXION_COLLISION_H
 #define AXION_COLLISION_H
